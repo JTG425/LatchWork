@@ -41,11 +41,18 @@ Optional: `AUTH_AUTH0_CONNECTION` — the Auth0 database connection used by the 
 
 Clicking **Sign in** opens an in-app dialog (sign in / create account tabs) instead of redirecting to Auth0's hosted page. It uses Auth0's cross-origin authentication: credentials go to `/co/authenticate` (sign in) or `/dbconnections/signup` (sign up), and the returned one-time `login_ticket` is passed through the normal `/auth/login` → `/authorize` → `/auth/callback` flow, so the session is still created by `@auth0/nextjs-auth0`.
 
-For this to work, configure the Auth0 **application**:
+For this to work, configure the Auth0 **application** (Dashboard → Applications → Applications → your app → **Settings**):
 
-- **Cross-Origin Authentication**: enabled (Application → Settings → Advanced or the Cross-Origin Authentication section).
-- **Allowed Origins (CORS)**: include your app origin (e.g. `http://localhost:3000` and your production URL).
-- The database connection (`Username-Password-Authentication` by default) must be enabled for the application, with sign-ups allowed.
+- Under **Cross-Origin Authentication**, toggle on **Allow Cross-Origin Authentication**.
+- In **Allowed Origins (CORS)**, add your app's origin URL(s) — e.g. `http://localhost:3000` and your production URL.
+- The database connection (`Username-Password-Authentication` by default) must be enabled for the application (Application → Connections), with sign-ups allowed.
+- If Auth0 responds with *"Grant type 'http://auth0.com/oauth/grant-type/password-realm' not allowed for the client"*, also enable the **Password** grant under Settings → **Advanced Settings** → **Grant Types**.
+
+Troubleshooting the dialog's error messages (they map to `/co/authenticate` error codes):
+
+- *"Embedded sign-in isn't enabled…"* → Auth0 returned `unauthorized_client` ("Cross origin login not allowed"): the **Allow Cross-Origin Authentication** toggle is off.
+- *"Couldn't reach the sign-in service…"* → the request never completed; if you're online, the origin is probably missing from **Allowed Origins (CORS)** (a CORS rejection is indistinguishable from a network failure in the browser).
+- *"Wrong email or password."* → normal `access_denied` from Auth0; credentials are simply wrong.
 
 Auth0 recommends a [custom domain](https://auth0.com/docs/customize/custom-domains) for embedded login in production so the cross-origin cookie isn't blocked by third-party-cookie protections. If embedded sign-in is unavailable, the dialog links to the hosted sign-in page as a fallback.
 

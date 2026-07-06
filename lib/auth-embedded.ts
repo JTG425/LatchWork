@@ -40,7 +40,10 @@ async function post(url: string, body: unknown, withCookies = false): Promise<{ 
       body: JSON.stringify(body),
     });
   } catch {
-    throw new AuthUiError('Couldn’t reach the sign-in service — check your connection and try again.', 'network');
+    /* fetch() rejects identically for a dead connection and for a CORS
+       rejection — the latter is what an origin missing from the Auth0
+       app's “Allowed Origins (CORS)” list looks like from here. */
+    throw new AuthUiError('Couldn’t reach the sign-in service — check your connection; if this keeps happening, this site’s URL may be missing from the Auth0 app’s Allowed Origins (CORS).', 'network');
   }
   const data = await res.json().catch(() => ({}));
   return { status: res.status, data };
@@ -59,10 +62,21 @@ export async function embeddedSignIn(cfg: AuthPublicConfig, email: string, passw
   }, true); // include cookies: Auth0 sets a co session used at /authorize
 
   if (status !== 200 || !data.login_ticket) {
-    if (status === 401) throw new AuthUiError(str(data.error_description) || 'Wrong email or password.', 'wrong_credentials');
-    if (status === 429) throw new AuthUiError('Too many attempts — wait a moment and try again.', 'rate_limited');
-    if (status === 403) throw new AuthUiError('Embedded sign-in isn’t enabled for this app — use the hosted sign-in link below.', 'not_enabled');
-    throw new AuthUiError(str(data.error_description) || 'Sign-in failed — please try again.');
+    /* Map by Auth0's error code, not HTTP status — per the API docs,
+       /co/authenticate uses 403 access_denied for wrong credentials
+       and 401 unauthorized_client for "Cross origin login not
+       allowed" (the toggle in the application's settings). */
+    const code = str(data.error);
+    const desc = str(data.error_description);
+    if (code === 'access_denied') throw new AuthUiError(desc || 'Wrong email or password.', 'wrong_credentials');
+    if (code === 'too_many_attempts') throw new AuthUiError(desc || 'Too many attempts — wait a moment and try again.', 'rate_limited');
+    if (code === 'blocked_user') throw new AuthUiError('This account is blocked — reset your password or contact support.', 'blocked');
+    if (code === 'password_leaked') throw new AuthUiError(desc || 'This sign-in was blocked because the password appeared in a data breach — check your email for instructions.', 'password_leaked');
+    if (code === 'unauthorized_client')
+      throw new AuthUiError('Embedded sign-in isn’t enabled for this Auth0 application — turn on “Allow Cross-Origin Authentication” in its settings, or use the hosted sign-in link below.', 'not_enabled');
+    if (code === 'invalid_request' && desc?.toLowerCase().includes('realm'))
+      throw new AuthUiError('The sign-in service is misconfigured (unknown connection) — check AUTH_AUTH0_CONNECTION.', 'bad_realm');
+    throw new AuthUiError(desc || 'Sign-in failed — please try again.');
   }
 
   /* @auth0/nextjs-auth0 forwards extra /auth/login query params to the
