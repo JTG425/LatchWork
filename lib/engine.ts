@@ -1,8 +1,11 @@
+import { GATE_DEFS, GATE_TYPES, GateType, isGateType } from './gates';
+
 export const GRID = 20;
 
+/* Gate types come from the lib/gates registry — one file per gate. */
 export type CompType =
   | 'IN' | 'BTN' | 'ONE' | 'CLK'
-  | 'AND' | 'OR' | 'NOT' | 'NAND' | 'NOR' | 'XOR'
+  | GateType
   | 'OUT' | 'IPIN' | 'OPIN' | 'CHIP';
 export interface Vec { x: number; y: number }
 /* A wire end is a component pin, a solder split on another wire, or a
@@ -108,20 +111,13 @@ export const newSimState = (): SimState => ({ vals: {}, sub: {} });
 export interface Pin { x: number; y: number; name?: string }
 export interface CompGeom { w: number; h: number; ins: Pin[]; outs: Pin[]; name: string; sub: string }
 
-const twoIn: Pin[] = [{ x: -20, y: 0 }, { x: -20, y: 40 }];
-const oneOut: Pin[] = [{ x: 80, y: 20 }];
-
-const PRIM: Record<Exclude<CompType, 'CHIP'>, CompGeom> = {
+/* Gate geometry lives with each gate in lib/gates; PRIM only holds the
+   remaining non-gate primitives. */
+const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
   IN: { name: 'Switch', sub: 'toggle 0 / 1', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
   BTN: { name: 'Button', sub: 'momentary 1', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
   ONE: { name: 'Constant 1', sub: 'always high', w: 40, h: 40, ins: [], outs: [{ x: 60, y: 20 }] },
   CLK: { name: 'Clock', sub: 'square wave', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
-  AND: { name: 'AND', sub: 'A · B', w: 60, h: 40, ins: twoIn, outs: oneOut },
-  OR: { name: 'OR', sub: 'A + B', w: 60, h: 40, ins: twoIn, outs: oneOut },
-  NOT: { name: 'NOT', sub: 'inverter', w: 60, h: 40, ins: [{ x: -20, y: 20 }], outs: oneOut },
-  NAND: { name: 'NAND', sub: 'inverted AND', w: 60, h: 40, ins: twoIn, outs: oneOut },
-  NOR: { name: 'NOR', sub: 'inverted OR', w: 60, h: 40, ins: twoIn, outs: oneOut },
-  XOR: { name: 'XOR', sub: 'A ⊕ B', w: 60, h: 40, ins: twoIn, outs: oneOut },
   OUT: { name: 'LED', sub: 'output', w: 40, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
   IPIN: { name: 'Input pin', sub: 'chip input', w: 40, h: 40, ins: [], outs: [{ x: 60, y: 20 }] },
   OPIN: { name: 'Output pin', sub: 'chip output', w: 40, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
@@ -129,13 +125,13 @@ const PRIM: Record<Exclude<CompType, 'CHIP'>, CompGeom> = {
 
 export const PALETTE_ORDER: [string, CompType[]][] = [
   ['Inputs', ['IN', 'BTN', 'ONE', 'CLK']],
-  ['Gates', ['AND', 'OR', 'NOT', 'NAND', 'NOR', 'XOR']],
+  ['Gates', [...GATE_TYPES]],
   ['Outputs', ['OUT']],
   ['Chip pins', ['IPIN', 'OPIN']],
 ];
 
 /* Gates whose input count can be edited (NOT is always 1-in) */
-export const MULTI_IN_GATES: ReadonlySet<CompType> = new Set(['AND', 'OR', 'NAND', 'NOR', 'XOR']);
+export const MULTI_IN_GATES: ReadonlySet<CompType> = new Set(GATE_TYPES.filter(t => GATE_DEFS[t].multiIn));
 export const MAX_GATE_INS = 4;
 export const clampGateIns = (n?: number) => Math.min(MAX_GATE_INS, Math.max(2, Math.round(n ?? 2)));
 
@@ -163,33 +159,32 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'w' | 'h'>, l
     if (def) return chipGeom(def, c.w, c.h);
     return { name: '?', sub: 'missing chip', w: 100, h: 40, ins: [], outs: [] };
   }
-  const base = PRIM[c.type];
-  if (MULTI_IN_GATES.has(c.type)) {
-    const n = clampGateIns(c.nIns);
-    const h = Math.max(40, (n - 1) * GRID);
-    const step = h / (n - 1);
-    return {
-      ...base, h,
-      ins: Array.from({ length: n }, (_, i) => ({ x: -20, y: Math.round(i * step) })),
-      outs: [{ x: 80, y: h / 2 }],
-    };
+  if (isGateType(c.type)) {
+    const gd = GATE_DEFS[c.type];
+    const base: CompGeom = { name: gd.name, sub: gd.sub, w: gd.w, h: gd.h, ins: gd.ins, outs: gd.outs };
+    if (gd.multiIn) {
+      const n = clampGateIns(c.nIns);
+      const h = Math.max(40, (n - 1) * GRID);
+      const step = h / (n - 1);
+      return {
+        ...base, h,
+        ins: Array.from({ length: n }, (_, i) => ({ x: -20, y: Math.round(i * step) })),
+        outs: [{ x: 80, y: h / 2 }],
+      };
+    }
+    return base;
   }
-  return base;
+  return PRIM[c.type];
 }
 
 function evalPrim(c: Comp, ins: number[], now: number): number[] {
+  if (isGateType(c.type)) return [GATE_DEFS[c.type].eval(ins)];
   switch (c.type) {
     case 'IN':
     case 'IPIN': return [c.on ? 1 : 0];
     case 'BTN': return [c.pressed ? 1 : 0];
     case 'ONE': return [1];
     case 'CLK': { const half = 500 / clampFreq(c.freq); return [Math.floor(now / half) % 2]; }
-    case 'AND': return [ins.every(v => v) ? 1 : 0];
-    case 'OR': return [ins.some(v => v) ? 1 : 0];
-    case 'NOT': return [ins[0] ? 0 : 1];
-    case 'NAND': return [ins.every(v => v) ? 0 : 1];
-    case 'NOR': return [ins.some(v => v) ? 0 : 1];
-    case 'XOR': return [ins.reduce((a, v) => a ^ v, 0)];
     default: return [];
   }
 }

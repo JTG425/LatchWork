@@ -11,6 +11,7 @@
     normalizeWires, isPinEnd, isAttachEnd,
     MULTI_IN_GATES, clampGateIns, clampFreq, CHIP_MIN_W, chipMinH,
   } from '@/lib/engine';
+  import { GATE_DEFS, isGateType } from '@/lib/gates';
 
   export interface SelInfo {
     kind: 'comp' | 'wire' | 'multi';
@@ -83,23 +84,6 @@
   }
   const footprint = (rot: number, w: number, h: number) =>
     (rot & 1) ? { w: h, h: w } : { w, h };
-
-  /* Gate bodies are generated for the gate's pin span h (default 40,
-     taller for 3–4 inputs) and overshoot to −8…h+8 so the input pins
-     enter the flat or curved back edge at the classic positions. */
-  function gateBody(type: CompType, h: number): string {
-    const t = -8, b = h + 8, m = h / 2;
-    switch (type) {
-      case 'AND': return `M4,${t} H30 C52,${t} 60,${m - 16} 60,${m} C60,${m + 16} 52,${b} 30,${b} H4 Z`;
-      case 'NAND': return `M4,${t} H28 C48,${t} 56,${m - 16} 56,${m} C56,${m + 16} 48,${b} 28,${b} H4 Z`;
-      case 'OR': return `M3,${t} H22 C42,${t} 55,${m - 16} 60,${m} C55,${m + 16} 42,${b} 22,${b} H3 C13,${m + 12} 13,${m - 12} 3,${t} Z`;
-      case 'NOR': return `M3,${t} H20 C38,${t} 50,${m - 16} 55,${m} C50,${m + 16} 38,${b} 20,${b} H3 C13,${m + 12} 13,${m - 12} 3,${t} Z`;
-      case 'XOR': return `M9,${t} H26 C45,${t} 55,${m - 16} 60,${m} C55,${m + 16} 45,${b} 26,${b} H9 C19,${m + 12} 19,${m - 12} 9,${t} Z`;
-      case 'NOT': return `M6,4 L6,36 L52,20 Z`;
-      default: return '';
-    }
-  }
-  const GATES: ReadonlySet<CompType> = new Set(['AND', 'OR', 'NOT', 'NAND', 'NOR', 'XOR']);
 
   const esc = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -256,7 +240,7 @@
       g.ins.forEach((p, i) => {
         const hi = c._ins?.[i] ?? 0;
         // stub ends slightly inside the body; overshoot hides under the fill
-        const bx = c.type === 'OR' || c.type === 'NOR' || c.type === 'XOR' ? 12 : c.type === 'CHIP' ? 0 : 8;
+        const bx = c.type === 'CHIP' ? 0 : isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8;
         stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${p.x},${p.y} L${bx},${p.y}"/>`;
         pins += pinSVG('in', i, p, hi);
       });
@@ -266,16 +250,18 @@
         pins += pinSVG('out', i, p, hi);
       });
 
-      if (GATES.has(c.type)) {
-        const m = g.h / 2;
-        inner = `<path class="body" d="${gateBody(c.type, g.h)}"/>`;
-        if (c.type === 'XOR')
-          inner += `<path d="M2,-8 C12,${m - 12} 12,${m + 12} 2,${g.h + 8}" fill="none" stroke="var(--body-stroke)" stroke-width="1.5"/>`;
-        if (c.type === 'NAND' || c.type === 'NOR')
-          inner += `<circle cx="${c.type === 'NAND' ? 60 : 59}" cy="${m}" r="4" class="body"/>`;
-        if (c.type === 'NOT')
-          inner += `<circle cx="56" cy="20" r="4" class="body"/>`;
-        inner += caption(g.name, 30, c.type === 'NOT' ? 50 : g.h + 21);
+      if (isGateType(c.type)) {
+        /* Body path, back curve, and inversion bubble all come from the
+           gate's own file in lib/gates — look there for shape bugs. */
+        const gd = GATE_DEFS[c.type];
+        inner = `<path class="body" d="${gd.body(g.h)}"/>`;
+        const curve = gd.backCurve?.(g.h);
+        if (curve)
+          inner += `<path d="${curve}" fill="none" stroke="var(--body-stroke)" stroke-width="1.5"/>`;
+        const bub = gd.bubble?.(g.h);
+        if (bub)
+          inner += `<circle cx="${bub.cx}" cy="${bub.cy}" r="${bub.r}" class="body"/>`;
+        inner += caption(g.name, 30, gd.captionY ?? g.h + 21);
       } else if (c.type === 'IN') {
         const on = !!c.on;
         inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
