@@ -8,16 +8,19 @@
    import {
     GRID, Comp, Wire, Board, ChipLib, CompType,
     SimState, newSimState, getGeom, evaluateNet,
+    MULTI_IN_GATES, clampGateIns, clampFreq, CHIP_MIN_W, chipMinH,
   } from '@/lib/engine';
-  
+
   export interface SelInfo {
     kind: 'comp' | 'wire';
     id: string;
     type?: CompType;
     label?: string;
     labelable?: boolean;
+    nIns?: number;      // gates with an editable input count
+    freq?: number;      // clocks
   }
-  
+
   export interface EditorCallbacks {
     getLib(): ChipLib;
     onSelect(info: SelInfo | null): void;
@@ -25,7 +28,7 @@
     onZoom(pct: number): void;
     onBoardChange(): void;
   }
-  
+
   export interface EditorApi {
     beginPlace(type: CompType, chipId?: string): void;
     deleteSelection(): void;
@@ -35,48 +38,57 @@
     zoomOut(): void;
     resetView(): void;
     setLabel(id: string, label: string): void;
+    setNumInputs(id: string, n: number): void;
+    setFreq(id: string, hz: number): void;
     getBoard(): Board;
     setBoard(b: Board): void;
     removeChipInstances(chipId: string): void;
     rerender(): void;
     destroy(): void;
   }
-  
+
   const uid = () =>
     'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const snap = (v: number) => Math.round(v / GRID) * GRID;
-  
-  /* Gate bodies span y −10…50 so the input pins at y 0 / 40 enter the
-     flat or curved back edge at the classic quarter positions. */
-  const GATE_BODY: Partial<Record<CompType, string>> = {
-    AND:  'M4,-8 H30 C52,-8 60,4 60,20 C60,36 52,48 30,48 H4 Z',
-    NAND: 'M4,-8 H28 C48,-8 56,4 56,20 C56,36 48,48 28,48 H4 Z',
-    OR:   'M3,-8 H22 C42,-8 55,4 60,20 C55,36 42,48 22,48 H3 C13,32 13,8 3,-8 Z',
-    NOR:  'M3,-8 H20 C38,-8 50,4 55,20 C50,36 38,48 20,48 H3 C13,32 13,8 3,-8 Z',
-    XOR:  'M9,-8 H26 C45,-8 55,4 60,20 C55,36 45,48 26,48 H9 C19,32 19,8 9,-8 Z',
-    NOT:  'M6,4 L6,36 L52,20 Z',
-  };
-  
+
+  /* Gate bodies are generated for the gate's pin span h (default 40,
+     taller for 3–4 inputs) and overshoot to −8…h+8 so the input pins
+     enter the flat or curved back edge at the classic positions. */
+  function gateBody(type: CompType, h: number): string {
+    const t = -8, b = h + 8, m = h / 2;
+    switch (type) {
+      case 'AND': return `M4,${t} H30 C52,${t} 60,${m - 16} 60,${m} C60,${m + 16} 52,${b} 30,${b} H4 Z`;
+      case 'NAND': return `M4,${t} H28 C48,${t} 56,${m - 16} 56,${m} C56,${m + 16} 48,${b} 28,${b} H4 Z`;
+      case 'OR': return `M3,${t} H22 C42,${t} 55,${m - 16} 60,${m} C55,${m + 16} 42,${b} 22,${b} H3 C13,${m + 12} 13,${m - 12} 3,${t} Z`;
+      case 'NOR': return `M3,${t} H20 C38,${t} 50,${m - 16} 55,${m} C50,${m + 16} 38,${b} 20,${b} H3 C13,${m + 12} 13,${m - 12} 3,${t} Z`;
+      case 'XOR': return `M9,${t} H26 C45,${t} 55,${m - 16} 60,${m} C55,${m + 16} 45,${b} 26,${b} H9 C19,${m + 12} 19,${m - 12} 9,${t} Z`;
+      case 'NOT': return `M6,4 L6,36 L52,20 Z`;
+      default: return '';
+    }
+  }
+  const GATES: ReadonlySet<CompType> = new Set(['AND', 'OR', 'NOT', 'NAND', 'NOR', 'XOR']);
+
   const esc = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  
+
   export function createEditor(svg: SVGSVGElement, cb: EditorCallbacks): EditorApi {
     const world = svg.querySelector('#world') as SVGGElement;
-  
+
     /* ── state ── */
     let comps: Comp[] = [];
     let wires: Wire[] = [];
     let sim: SimState = newSimState();
     let view = { x: 0, y: 0, k: 1 };
-  
+
     let sel: SelInfo | null = null;
     let wiring: { comp: string; side: 'in' | 'out'; pin: number; mx: number; my: number; downX: number; downY: number; fresh: boolean } | null = null;
     let drag: { id: string; ox: number; oy: number; moved: boolean; sx: number; sy: number } | null = null;
+    let resize: { id: string } | null = null;
     let pan: { sx: number; sy: number; vx: number; vy: number } | null = null;
     let placing: { type: CompType; chipId?: string; mx: number; my: number; over: boolean } | null = null;
-  
+
     const lib = () => cb.getLib();
-  
+
     /* ── helpers ── */
     function toWorld(clientX: number, clientY: number) {
       const r = svg.getBoundingClientRect();
@@ -95,7 +107,7 @@
       return `M${x1},${y1} L${x1 + 20},${y1} L${x1 + 20},${my} L${x2 - 20},${my} L${x2 - 20},${y2} L${x2},${y2}`;
     }
     const find = (id: string) => comps.find(c => c.id === id);
-  
+
     function select(next: SelInfo | null) {
       sel = next;
       cb.onSelect(sel);
@@ -103,29 +115,53 @@
     function selInfoFor(c: Comp): SelInfo {
       return {
         kind: 'comp', id: c.id, type: c.type, label: c.label || '',
-        labelable: c.type === 'IN' || c.type === 'BTN' || c.type === 'OUT' || c.type === 'CHIP',
+        labelable: c.type === 'IN' || c.type === 'BTN' || c.type === 'OUT' || c.type === 'CHIP'
+          || c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'CLK',
+        nIns: MULTI_IN_GATES.has(c.type) ? clampGateIns(c.nIns) : undefined,
+        freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
       };
     }
-  
+
     /* ── simulation ── */
     function recompute() {
-      evaluateNet(comps, wires, sim, lib());
+      evaluateNet(comps, wires, sim, lib(), undefined, 0, Date.now());
     }
-  
+
+    /* Clocks re-simulate on their own: whenever any clock on the board
+       (or inside a placed chip) crosses a half-period boundary, refresh. */
+    function clockSig(now: number): string {
+      let sig = '';
+      const visit = (cs: Comp[], depth: number) => {
+        if (depth > 6) return;
+        for (const c of cs) {
+          if (c.type === 'CLK') sig += Math.floor(now / (500 / clampFreq(c.freq))) % 2;
+          else if (c.type === 'CHIP' && c.chipId) { const d = lib()[c.chipId]; if (d) visit(d.comps, depth + 1); }
+        }
+      };
+      visit(comps, 0);
+      return sig;
+    }
+    let lastClockSig = '';
+    const clockTimer = window.setInterval(() => {
+      const sig = clockSig(Date.now());
+      if (sig !== lastClockSig) { lastClockSig = sig; refresh(false); }
+    }, 25);
+
     /* ── rendering ── */
     function pinSVG(c: Comp, side: 'in' | 'out', idx: number, hi: number) {
       const p = getGeom(c, lib())[side === 'out' ? 'outs' : 'ins'][idx];
       return `<circle class="pinhit" data-pin="${c.id}|${side}|${idx}" cx="${p.x}" cy="${p.y}" r="10"/>
               <circle class="pin ${hi ? 'hi' : ''}" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
     }
-  
+
     function compSVG(c: Comp, ghost: boolean): string {
       const g = getGeom(c, lib());
-      const selCls = sel && sel.kind === 'comp' && sel.id === c.id ? ' selected' : '';
+      const selected = !!(sel && sel.kind === 'comp' && sel.id === c.id);
+      const selCls = selected ? ' selected' : '';
       let inner = '', stubs = '', pins = '';
       const caption = (text: string, x: number, y: number) =>
         `<text class="lbl" x="${x}" y="${y}">${esc(text)}</text>`;
-  
+
       g.ins.forEach((p, i) => {
         const hi = c._ins?.[i] ?? 0;
         // stub ends slightly inside the body; overshoot hides under the fill
@@ -138,16 +174,17 @@
         stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${g.w},${p.y} L${p.x},${p.y}"/>`;
         pins += pinSVG(c, 'out', i, hi);
       });
-  
-      if (GATE_BODY[c.type]) {
-        inner = `<path class="body" d="${GATE_BODY[c.type]}"/>`;
+
+      if (GATES.has(c.type)) {
+        const m = g.h / 2;
+        inner = `<path class="body" d="${gateBody(c.type, g.h)}"/>`;
         if (c.type === 'XOR')
-          inner += `<path d="M2,-8 C12,8 12,32 2,48" fill="none" stroke="var(--body-stroke)" stroke-width="1.5"/>`;
+          inner += `<path d="M2,-8 C12,${m - 12} 12,${m + 12} 2,${g.h + 8}" fill="none" stroke="var(--body-stroke)" stroke-width="1.5"/>`;
         if (c.type === 'NAND' || c.type === 'NOR')
-          inner += `<circle cx="${c.type === 'NAND' ? 60 : 59}" cy="20" r="4" class="body"/>`;
+          inner += `<circle cx="${c.type === 'NAND' ? 60 : 59}" cy="${m}" r="4" class="body"/>`;
         if (c.type === 'NOT')
           inner += `<circle cx="56" cy="20" r="4" class="body"/>`;
-        inner += caption(g.name, 30, c.type === 'NOT' ? 50 : 61);
+        inner += caption(g.name, 30, c.type === 'NOT' ? 50 : g.h + 21);
       } else if (c.type === 'IN') {
         const on = !!c.on;
         inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
@@ -160,6 +197,26 @@
           <circle cx="30" cy="20" r="11" fill="${on ? 'var(--hi)' : '#3a3a44'}" stroke="var(--body-stroke)" stroke-width="1.5"/>
           <circle cx="30" cy="20" r="${on ? 4.5 : 6}" fill="${on ? '#0d331a' : '#55555f'}"/>` +
           caption(`${c.label || 'BTN'} · ${on ? 1 : 0}`, 30, 52);
+      } else if (c.type === 'ONE') {
+        inner = `<rect class="body" x="0" y="0" width="40" height="40" rx="9"/>
+          <text class="pindigit hi" x="20" y="26">1</text>` +
+          caption('HIGH', 20, 52);
+      } else if (c.type === 'CLK') {
+        const on = sim.vals[c.id + ':0'] | 0;
+        inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
+          <path d="M10,${on ? 13 : 27} H19 V${on ? 27 : 13} H29 V${on ? 13 : 27} H39 V${on ? 27 : 13} H49"
+            fill="none" stroke="${on ? 'var(--hi)' : 'var(--muted)'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
+          caption(`${c.label || 'CLK'} · ${clampFreq(c.freq)}Hz`, 30, 52);
+      } else if (c.type === 'IPIN') {
+        const on = !!c.on;
+        inner = `<rect class="body pinport ${on ? 'hi' : ''}" x="0" y="0" width="40" height="40" rx="7"/>
+          <text class="pindigit ${on ? 'hi' : ''}" x="20" y="26">${on ? 1 : 0}</text>` +
+          caption(`▸ ${c.label || 'IN?'}`, 20, 52);
+      } else if (c.type === 'OPIN') {
+        const lit = c._ins?.[0] ?? 0;
+        inner = `<circle class="body pinport ${lit ? 'hi' : ''}" cx="20" cy="20" r="19"/>
+          <text class="pindigit ${lit ? 'hi' : ''}" x="20" y="26">${lit ? 1 : 0}</text>` +
+          caption(`${c.label || 'OUT?'} ▸`, 20, 52);
       } else if (c.type === 'OUT') {
         const lit = c._ins?.[0] ?? 0;
         inner = `<rect class="body" x="0" y="0" width="40" height="40" rx="10"/>
@@ -174,15 +231,26 @@
         g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start">${esc(p.name || '')}</text>`; });
         g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end">${esc(p.name || '')}</text>`; });
         if (c.label && c.label !== g.name) inner += caption(c.label, g.w / 2, g.h + 14);
+        if (selected && !ghost) {
+          // corner grip: drag to resize the chip body in grid steps
+          inner += `<path class="resizegrip" d="M${g.w - 13},${g.h - 2} L${g.w - 2},${g.h - 13} M${g.w - 8},${g.h - 2} L${g.w - 2},${g.h - 8}"/>
+            <rect class="resizehit" data-resize="${c.id}" x="${g.w - 16}" y="${g.h - 16}" width="22" height="22"/>`;
+        }
       }
-  
+
       return `<g class="comp${selCls}${ghost ? ' ghost' : ''}" data-comp="${c.id}"
                 transform="translate(${c.x},${c.y})">${stubs}${inner}${pins}</g>`;
     }
-  
+
     function render() {
       let out = `<rect x="-20000" y="-20000" width="40000" height="40000" fill="url(#dots)"/>`;
-  
+
+      const fanout = new Map<string, number>();
+      for (const w of wires) {
+        const k = w.from.comp + ':' + w.from.pin;
+        fanout.set(k, (fanout.get(k) || 0) + 1);
+      }
+
       for (const w of wires) {
         const fc = find(w.from.comp), tc = find(w.to.comp);
         if (!fc || !tc) continue;
@@ -204,7 +272,18 @@
         }
       }
       for (const c of comps) out += compSVG(c, false);
-  
+
+      // solder-dot notation where one output fans out into several wires
+      for (const [key, count] of fanout) {
+        if (count < 2) continue;
+        const i = key.lastIndexOf(':');
+        const c = find(key.slice(0, i));
+        if (!c) continue;
+        const p = pinPos(c, 'out', +key.slice(i + 1));
+        const hi = sim.vals[key] | 0;
+        out += `<circle class="junction${hi ? ' hi' : ''}" cx="${p.x}" cy="${p.y}" r="5"/>`;
+      }
+
       if (placing && placing.over) {
         const ghost: Comp = {
           id: '_ghost', type: placing.type, chipId: placing.chipId,
@@ -213,21 +292,21 @@
         };
         out += compSVG(ghost, true);
       }
-  
+
       world.setAttribute('transform', `translate(${view.x},${view.y}) scale(${view.k})`);
       world.innerHTML = out;
-  
+
       cb.onCounts({ parts: comps.length, wires: wires.length });
       cb.onZoom(Math.round(view.k * 100));
       svg.classList.toggle('wiring', !!wiring);
     }
-  
+
     function refresh(changed = true) {
       recompute();
       render();
       if (changed) cb.onBoardChange();
     }
-  
+
     /* ── wiring ── */
     type PinHit = { comp: string; side: 'in' | 'out'; pin: number };
     function parsePin(el: Element): PinHit {
@@ -242,16 +321,22 @@
       wires.push({ id: uid(), from: { comp: from.comp, pin: from.pin }, to: { comp: to.comp, pin: to.pin } });
       return true;
     }
-  
+
     /* ── pointer handlers ── */
     function onDown(e: PointerEvent) {
       if (e.button === 2) return;
       const pt = toWorld(e.clientX, e.clientY);
       const target = e.target as Element;
+      const resizeEl = target.closest('[data-resize]');
       const pinEl = target.closest('[data-pin]');
       const compEl = target.closest('[data-comp]');
       const wireEl = target.closest('[data-wire]');
-  
+
+      if (resizeEl) {
+        const c = find((resizeEl as SVGElement).dataset.resize!);
+        if (c) { resize = { id: c.id }; if (wiring) wiring = null; render(); }
+        return;
+      }
       if (pinEl) {
         const p = parsePin(pinEl);
         if (wiring) {
@@ -285,8 +370,18 @@
       svg.classList.add('panning');
       render();
     }
-  
+
     function onMove(e: PointerEvent) {
+      if (resize) {
+        const c = find(resize.id);
+        if (!c) { resize = null; return; }
+        const def = c.chipId ? lib()[c.chipId] : undefined;
+        const pt = toWorld(e.clientX, e.clientY);
+        c.w = Math.max(CHIP_MIN_W, snap(pt.x - c.x));
+        c.h = Math.max(def ? chipMinH(def) : GRID * 2, snap(pt.y - c.y));
+        refresh(false);
+        return;
+      }
       if (drag) {
         const c = find(drag.id);
         if (!c) { drag = null; return; }
@@ -321,11 +416,16 @@
         render();
       }
     }
-  
+
     function onUp(e: PointerEvent) {
+      if (resize) {
+        resize = null;
+        refresh();
+        return;
+      }
       if (drag) {
         const c = find(drag.id);
-        if (c && !drag.moved && c.type === 'IN') c.on = !c.on;
+        if (c && !drag.moved && (c.type === 'IN' || c.type === 'IPIN')) c.on = !c.on;
         if (c && c.type === 'BTN') c.pressed = false;
         const moved = drag.moved;
         drag = null;
@@ -352,7 +452,8 @@
             id: uid(), type: placing.type, chipId: placing.chipId,
             x: snap(placing.mx - g.w / 2), y: snap(placing.my - g.h / 2),
           };
-          if (placing.type === 'IN') c.on = false;
+          if (placing.type === 'IN' || placing.type === 'IPIN') c.on = false;
+          if (placing.type === 'CLK') c.freq = 1;
           comps.push(c);
           select(selInfoFor(c));
         }
@@ -360,7 +461,7 @@
         refresh();
       }
     }
-  
+
     function onContext(e: MouseEvent) {
       e.preventDefault();
       const target = e.target as Element;
@@ -369,7 +470,7 @@
       if (compEl) deleteComp((compEl as SVGElement).dataset.comp!);
       else if (wireEl) { wires = wires.filter(w => w.id !== (wireEl as SVGElement).dataset.wire); refresh(); }
     }
-  
+
     function onWheel(e: WheelEvent) {
       e.preventDefault();
       const r = svg.getBoundingClientRect();
@@ -381,14 +482,14 @@
       view.k = k;
       render();
     }
-  
+
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
       if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); deleteSelection(); }
       if (e.key === 'Escape') { wiring = null; placing = null; select(null); render(); }
     }
-  
+
     /* ── mutations ── */
     function deleteComp(id: string) {
       comps = comps.filter(c => c.id !== id);
@@ -402,7 +503,7 @@
       if (sel.kind === 'comp') deleteComp(sel.id);
       else { wires = wires.filter(w => w.id !== sel!.id); select(null); refresh(); }
     }
-  
+
     /* ── wire up ── */
     svg.addEventListener('pointerdown', onDown);
     window.addEventListener('pointermove', onMove);
@@ -410,9 +511,9 @@
     svg.addEventListener('contextmenu', onContext);
     svg.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('keydown', onKey);
-  
+
     refresh(false);
-  
+
     /* ── public API ── */
     return {
       beginPlace(type, chipId) { placing = { type, chipId, mx: 0, my: 0, over: false }; },
@@ -425,6 +526,20 @@
       setLabel(id, label) {
         const c = find(id);
         if (c) { c.label = label.slice(0, 12); refresh(); }
+      },
+      setNumInputs(id, n) {
+        const c = find(id);
+        if (!c || !MULTI_IN_GATES.has(c.type)) return;
+        c.nIns = clampGateIns(n);
+        wires = wires.filter(w => !(w.to.comp === id && w.to.pin >= c.nIns!));
+        if (sel?.id === id) select(selInfoFor(c));
+        refresh();
+      },
+      setFreq(id, hz) {
+        const c = find(id);
+        if (!c || c.type !== 'CLK') return;
+        c.freq = clampFreq(hz);
+        refresh();
       },
       getBoard(): Board {
         return JSON.parse(JSON.stringify({
@@ -452,6 +567,7 @@
       },
       rerender() { refresh(false); },
       destroy() {
+        clearInterval(clockTimer);
         svg.removeEventListener('pointerdown', onDown);
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
@@ -461,4 +577,3 @@
       },
     };
   }
-  
