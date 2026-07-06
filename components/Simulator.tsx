@@ -5,6 +5,7 @@ import {
   Board, ChipDef, ChipLib, CompType, PALETTE_ORDER, getGeom,
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef,
 } from '@/lib/engine';
+import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
 
 const LS_BOARD = 'latchwork.board.v1';
@@ -44,15 +45,21 @@ function seedBoard(): Board {
 function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
   const g = getGeom({ type, chipId: chip?.id }, chip ? { [chip.id]: chip } : {});
   const stroke = 'var(--body-stroke)', fill = 'var(--body-fill)';
-  const isGate = ['AND', 'OR', 'NOT', 'NAND', 'NOR', 'XOR'].includes(type);
+  const isGate = isGateType(type);
   let body: React.ReactNode;
-  switch (type) {
-    case 'AND': body = <path d="M4,-8 H30 C52,-8 60,4 60,20 C60,36 52,48 30,48 H4 Z" fill={fill} stroke={stroke} strokeWidth="1.5" />; break;
-    case 'NAND': body = <><path d="M4,-8 H28 C48,-8 56,4 56,20 C56,36 48,48 28,48 H4 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="60" cy="20" r="4" fill={fill} stroke={stroke} strokeWidth="1.5" /></>; break;
-    case 'OR': body = <path d="M3,-8 H22 C42,-8 55,4 60,20 C55,36 42,48 22,48 H3 C13,32 13,8 3,-8 Z" fill={fill} stroke={stroke} strokeWidth="1.5" />; break;
-    case 'NOR': body = <><path d="M3,-8 H20 C38,-8 50,4 55,20 C50,36 38,48 20,48 H3 C13,32 13,8 3,-8 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="59" cy="20" r="4" fill={fill} stroke={stroke} strokeWidth="1.5" /></>; break;
-    case 'XOR': body = <><path d="M9,-8 H26 C45,-8 55,4 60,20 C55,36 45,48 26,48 H9 C19,32 19,8 9,-8 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M2,-8 C12,8 12,32 2,48" fill="none" stroke={stroke} strokeWidth="1.5" /></>; break;
-    case 'NOT': body = <><path d="M6,4 L6,36 L52,20 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="56" cy="20" r="4" fill={fill} stroke={stroke} strokeWidth="1.5" /></>; break;
+  if (isGateType(type)) {
+    // gate icons render each gate file's own artwork at the default 40px span
+    const gd = GATE_DEFS[type];
+    const curve = gd.backCurve?.(40);
+    const bub = gd.bubble?.(40);
+    body = (
+      <>
+        <path d={gd.body(40)} fill={fill} stroke={stroke} strokeWidth="1.5" />
+        {curve && <path d={curve} fill="none" stroke={stroke} strokeWidth="1.5" />}
+        {bub && <circle cx={bub.cx} cy={bub.cy} r={bub.r} fill={fill} stroke={stroke} strokeWidth="1.5" />}
+      </>
+    );
+  } else switch (type) {
     case 'IN': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><rect x="11" y="11" width="38" height="18" rx="9" fill="var(--hi)" /><circle cx="40" cy="20" r="7" fill="#f5f5f7" /></>; break;
     case 'BTN': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="30" cy="20" r="11" fill="#3a3a44" stroke={stroke} strokeWidth="1.5" /><circle cx="30" cy="20" r="6" fill="#55555f" /></>; break;
     case 'ONE': body = <><rect x="0" y="0" width="40" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--hi)" fontSize="17" fontWeight="700" fontFamily="ui-monospace,Menlo,monospace">1</text></>; break;
