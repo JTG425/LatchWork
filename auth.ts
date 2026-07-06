@@ -7,17 +7,17 @@ const appBaseUrl =
   'http://localhost:3000';
 
 export const authConfigured = Boolean(
-  process.env.AUTH_AUTH0_DOMAIN &&
-  process.env.AUTH_AUTH0_CLIENT_ID &&
-  process.env.AUTH_AUTH0_CLIENT_SECRET &&
-  process.env.AUTH_AUTH0_SECRET
+  process.env.AUTH0_DOMAIN &&
+  process.env.AUTH0_CLIENT_ID &&
+  process.env.AUTH0_CLIENT_SECRET &&
+  process.env.AUTH0_SECRET
 );
 
 export const auth0 = new Auth0Client({
-  domain: process.env.AUTH_AUTH0_DOMAIN,
-  clientId: process.env.AUTH_AUTH0_CLIENT_ID,
-  clientSecret: process.env.AUTH_AUTH0_CLIENT_SECRET,
-  secret: process.env.AUTH_AUTH0_SECRET,
+  domain: process.env.AUTH0_DOMAIN,
+  clientId: process.env.AUTH0_CLIENT_ID,
+  clientSecret: process.env.AUTH0_CLIENT_SECRET,
+  secret: process.env.AUTH0_SECRET,
   appBaseUrl,
   authorizationParameters: {
     scope: 'openid profile email',

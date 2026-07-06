@@ -7,8 +7,6 @@ import {
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
-import AuthDialog from '@/components/AuthDialog';
-import { AuthPublicConfig } from '@/lib/auth-embedded';
 
 const LS_BOARD = 'latchwork.board.v1';
 const LS_CHIPS = 'latchwork.chips.v1';
@@ -81,7 +79,7 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
   );
 }
 
-export default function Simulator({ user, auth }: { user: SimUser | null; auth: AuthPublicConfig | null }) {
+export default function Simulator({ user }: { user: SimUser | null }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const apiRef = useRef<EditorApi | null>(null);
   const chipsRef = useRef<ChipLib>({});
@@ -98,7 +96,6 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [chipName, setChipName] = useState('');
   const [toast, setToast] = useState<string | null>(null);
-  const [authOpen, setAuthOpen] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const notify = useCallback((msg: string) => {
@@ -287,11 +284,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         <button className="tbtn" disabled={!sel} onClick={() => api().deleteSelection()}>Delete</button>
         <button className="tbtn danger" onClick={clearBoard}>Clear</button>
         <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>
-        {user
-          ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a>
-          : auth
-            ? <button className="tbtn ghostbtn" onClick={() => setAuthOpen(true)}>Sign in</button>
-            : <a className="tbtn ghostbtn" href="/auth/login">Sign in</a>}
+        {user ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a> : <a className="tbtn ghostbtn" href="/auth/login">Sign in</a>}
       </div>
 
       <div id="main">
@@ -368,8 +361,6 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         <span><kbd>⌫</kbd> delete · <kbd>esc</kbd> cancel · scroll to pan · <kbd>ctrl</kbd>+scroll to zoom · <kbd>space</kbd>+drag or middle-drag to pan</span>
         <span>{user ? 'Chips sync to your account' : 'Chips save to this browser — sign in to sync'}</span>
       </div>
-
-      {authOpen && auth && <AuthDialog auth={auth} onClose={() => setAuthOpen(false)} />}
 
       {dialogOpen && (
         <div className="overlay" onPointerDown={e => { if (e.target === e.currentTarget) setDialogOpen(false); }}>
