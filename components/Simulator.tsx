@@ -212,7 +212,6 @@ export default function Simulator({ user }: { user: SimUser | null }) {
   return (
     <div id="app">
       <div id="titlebar">
-        <div className="lights" aria-hidden="true"><span className="r" /><span className="y" /><span className="g" /></div>
         <div id="appname">Latchwork<em>digital logic workbench</em></div>
         <div className="spacer" />
 
