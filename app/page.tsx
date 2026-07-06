@@ -9,9 +9,9 @@ export default async function Home() {
      is public by design — it appears in every /authorize URL). */
   const auth: AuthPublicConfig | null = authConfigured
     ? {
-        domain: process.env.AUTH_AUTH0_DOMAIN!,
-        clientId: process.env.AUTH_AUTH0_CLIENT_ID!,
-        realm: process.env.AUTH_AUTH0_CONNECTION || 'Username-Password-Authentication',
+        domain: process.env.AUTH0_DOMAIN!,
+        clientId: process.env.AUTH0_CLIENT_ID!,
+        realm: process.env.AUTH0_CONNECTION || 'Username-Password-Authentication',
       }
     : null;
 
