@@ -55,7 +55,11 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     case 'NOT': body = <><path d="M6,4 L6,36 L52,20 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="56" cy="20" r="4" fill={fill} stroke={stroke} strokeWidth="1.5" /></>; break;
     case 'IN': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><rect x="11" y="11" width="38" height="18" rx="9" fill="var(--hi)" /><circle cx="40" cy="20" r="7" fill="#f5f5f7" /></>; break;
     case 'BTN': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="30" cy="20" r="11" fill="#3a3a44" stroke={stroke} strokeWidth="1.5" /><circle cx="30" cy="20" r="6" fill="#55555f" /></>; break;
+    case 'ONE': body = <><rect x="0" y="0" width="40" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--hi)" fontSize="17" fontWeight="700" fontFamily="ui-monospace,Menlo,monospace">1</text></>; break;
+    case 'CLK': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M10,27 H19 V13 H29 V27 H39 V13 H49" fill="none" stroke="var(--hi)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" /></>; break;
     case 'OUT': body = <><rect x="0" y="0" width="40" height="40" rx="10" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="20" cy="20" r="11" fill="var(--led-on)" stroke="#ff6b61" strokeWidth="1.5" /></>; break;
+    case 'IPIN': body = <><rect x="0" y="0" width="40" height="40" rx="7" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
+    case 'OPIN': body = <><circle cx="20" cy="20" r="19" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'CHIP': body = <><rect x="0" y="0" width={g.w} height={g.h} rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="12" cy="10" r="2.5" fill="var(--muted)" /></>; break;
   }
   const yMin = isGate ? -10 : -2;
@@ -77,6 +81,7 @@ export default function Simulator({ user }: { user: SimUser | null }) {
   const [chips, setChipsState] = useState<ChipDef[]>([]);
   const [sel, setSel] = useState<SelInfo | null>(null);
   const [labelDraft, setLabelDraft] = useState('');
+  const [freqDraft, setFreqDraft] = useState('');
   const [counts, setCounts] = useState({ parts: 0, wires: 0 });
   const [zoom, setZoom] = useState(100);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -108,7 +113,11 @@ export default function Simulator({ user }: { user: SimUser | null }) {
   useEffect(() => {
     const ed = createEditor(svgRef.current!, {
       getLib: () => chipsRef.current,
-      onSelect: info => { setSel(info); setLabelDraft(info?.label ?? ''); },
+      onSelect: info => {
+        setSel(info);
+        setLabelDraft(info?.label ?? '');
+        setFreqDraft(info?.freq != null ? String(info.freq) : '');
+      },
       onCounts: setCounts,
       onZoom: setZoom,
       onBoardChange: () => {
@@ -182,6 +191,12 @@ export default function Simulator({ user }: { user: SimUser | null }) {
     if (sel) apiRef.current!.setLabel(sel.id, v);
   };
 
+  const onFreqChange = (v: string) => {
+    setFreqDraft(v);
+    const hz = parseFloat(v);
+    if (sel && isFinite(hz) && hz > 0) apiRef.current!.setFreq(sel.id, hz);
+  };
+
   const clearBoard = () => {
     apiRef.current!.clear();
     try { localStorage.setItem(LS_BOARD, JSON.stringify({ comps: [], wires: [] })); } catch {}
@@ -206,6 +221,36 @@ export default function Simulator({ user }: { user: SimUser | null }) {
             aria-label="Component name"
             onChange={e => onLabelChange(e.target.value)}
           />
+        )}
+
+        {sel?.kind === 'comp' && sel.nIns != null && (
+          <div id="ningrp" title="Number of inputs">
+            <span>inputs</span>
+            {[2, 3, 4].map(n => (
+              <button
+                key={n}
+                className={sel.nIns === n ? 'on' : ''}
+                aria-pressed={sel.nIns === n}
+                onClick={() => api().setNumInputs(sel.id, n)}
+              >{n}</button>
+            ))}
+          </div>
+        )}
+
+        {sel?.kind === 'comp' && sel.type === 'CLK' && (
+          <div id="freqgrp" title="Clock frequency">
+            <input
+              className="mono"
+              type="number"
+              min={0.1}
+              max={20}
+              step={0.5}
+              value={freqDraft}
+              aria-label="Clock frequency in hertz"
+              onChange={e => onFreqChange(e.target.value)}
+            />
+            <span>Hz</span>
+          </div>
         )}
 
         <div id="livedot"><i />Live</div>
@@ -243,8 +288,8 @@ export default function Simulator({ user }: { user: SimUser | null }) {
           <div className="pal-head">My chips</div>
           {chips.length === 0 && (
             <div className="pal-empty">
-              Build a circuit with switches and LEDs, then <b>Save as chip</b> to package it here — like a
-              D flip-flop you can reuse anywhere.
+              Build a circuit with <b>Input</b> and <b>Output pins</b>, then <b>Save as chip</b> to package it
+              here — like a D flip-flop you can reuse anywhere.
             </div>
           )}
           {chips.map(def => (
@@ -272,10 +317,9 @@ export default function Simulator({ user }: { user: SimUser | null }) {
               <pattern id="dots" width="20" height="20" x="10" y="10" patternUnits="userSpaceOnUse">
                 <circle cx="10" cy="10" r="1.1" fill="var(--dot)" />
               </pattern>
-              <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
-                <feGaussianBlur stdDeviation="2.2" result="b" />
-                <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
-              </filter>
+              {/* NOTE: wires glow via a CSS drop-shadow, not an SVG filter —
+                  filters with objectBoundingBox units make perfectly straight
+                  (zero-area bbox) lines vanish entirely */}
               <filter id="ledglow" x="-120%" y="-120%" width="340%" height="340%">
                 <feGaussianBlur stdDeviation="6" result="b" />
                 <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
@@ -290,7 +334,7 @@ export default function Simulator({ user }: { user: SimUser | null }) {
       <div id="statusbar">
         <span className="mono"><b>{counts.parts}</b> parts · <b>{counts.wires}</b> wires · <b>{chips.length}</b> chips</span>
         <span>Click a <b>pin</b>, then another pin to wire</span>
-        <span>Switches &amp; LEDs become a chip&apos;s pins when you <b>Save as chip</b> — name them first</span>
+        <span>Label <b>Input/Output pins</b> — they become the chip&apos;s pins when you <b>Save as chip</b></span>
         <span><kbd>⌫</kbd> delete · <kbd>esc</kbd> cancel · scroll to zoom · drag empty space to pan</span>
         <span>{user ? 'Chips sync to your account' : 'Chips save to this browser — sign in to sync'}</span>
       </div>
@@ -300,8 +344,8 @@ export default function Simulator({ user }: { user: SimUser | null }) {
           <div className="dialog" role="dialog" aria-modal="true" aria-label="Save as chip">
             <h2>Save as chip</h2>
             <p>
-              The whole board becomes one reusable part. Its <b>{'switches and buttons'}</b> become input pins and
-              its <b>LEDs</b> become output pins, top to bottom. Their names become the pin names.
+              The whole board becomes one reusable part. Its <b>Input pins</b> become the chip&apos;s inputs and
+              its <b>Output pins</b> become its outputs, top to bottom. Their labels become the pin names.
             </p>
             <input
               autoFocus
