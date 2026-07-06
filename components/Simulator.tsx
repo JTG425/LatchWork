@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Board, ChipDef, ChipLib, CompType, PALETTE_ORDER, getGeom,
-  makeChipDef, validateChipSource, chipUsedBy,
+  makeChipDef, validateChipSource, chipUsedBy, migrateChipDef,
 } from '@/lib/engine';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
 
@@ -28,15 +28,15 @@ function seedBoard(): Board {
       { id: id('qn'), type: 'OUT', x: 560, y: 260, label: 'Q̄' },
     ],
     wires: [
-      { id: id('w1'), from: { comp: id('s'), pin: 0 }, to: { comp: id('inv1'), pin: 0 } },
-      { id: id('w2'), from: { comp: id('r'), pin: 0 }, to: { comp: id('inv2'), pin: 0 } },
-      { id: id('w3'), from: { comp: id('inv1'), pin: 0 }, to: { comp: id('n1'), pin: 0 } },
-      { id: id('w4'), from: { comp: id('inv2'), pin: 0 }, to: { comp: id('n2'), pin: 1 } },
-      { id: id('w5'), from: { comp: id('n2'), pin: 0 }, to: { comp: id('n1'), pin: 1 } },
-      { id: id('w6'), from: { comp: id('n1'), pin: 0 }, to: { comp: id('n2'), pin: 0 } },
-      { id: id('w7'), from: { comp: id('n1'), pin: 0 }, to: { comp: id('q'), pin: 0 } },
-      { id: id('w8'), from: { comp: id('n2'), pin: 0 }, to: { comp: id('qn'), pin: 0 } },
-    ],
+      ['w1', 's', 0, 'inv1', 0], ['w2', 'r', 0, 'inv2', 0],
+      ['w3', 'inv1', 0, 'n1', 0], ['w4', 'inv2', 0, 'n2', 1],
+      ['w5', 'n2', 0, 'n1', 1], ['w6', 'n1', 0, 'n2', 0],
+      ['w7', 'n1', 0, 'q', 0], ['w8', 'n2', 0, 'qn', 0],
+    ].map(([w, f, fp, t, tp]) => ({
+      id: id(w as string),
+      a: { comp: id(f as string), side: 'out' as const, pin: fp as number },
+      b: { comp: id(t as string), side: 'in' as const, pin: tp as number },
+    })),
   };
 }
 
@@ -83,6 +83,7 @@ export default function Simulator({ user }: { user: SimUser | null }) {
   const [labelDraft, setLabelDraft] = useState('');
   const [freqDraft, setFreqDraft] = useState('');
   const [armed, setArmed] = useState<PlacingInfo | null>(null);
+  const [wireTool, setWireTool] = useState(false);
   const [counts, setCounts] = useState({ parts: 0, wires: 0 });
   const [zoom, setZoom] = useState(100);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -122,6 +123,7 @@ export default function Simulator({ user }: { user: SimUser | null }) {
       onCounts: setCounts,
       onZoom: setZoom,
       onPlacing: setArmed,
+      onWireTool: setWireTool,
       onBoardChange: () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(() => {
@@ -132,7 +134,7 @@ export default function Simulator({ user }: { user: SimUser | null }) {
     apiRef.current = ed;
 
     let local: ChipDef[] = [];
-    try { local = JSON.parse(localStorage.getItem(LS_CHIPS) || '[]'); } catch {}
+    try { local = (JSON.parse(localStorage.getItem(LS_CHIPS) || '[]') as ChipDef[]).map(migrateChipDef); } catch {}
     setChips(local, false);
     chipsRef.current = Object.fromEntries(local.map(c => [c.id, c]));
 
@@ -148,7 +150,7 @@ export default function Simulator({ user }: { user: SimUser | null }) {
         .then(r => (r.ok ? r.json() : []))
         .then((remote: ChipDef[]) => {
           const byId = new Map(local.map(c => [c.id, c]));
-          for (const c of remote || []) if (!byId.has(c.id)) byId.set(c.id, c);
+          for (const c of remote || []) if (!byId.has(c.id)) byId.set(c.id, migrateChipDef(c));
           const merged = [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
           setChips(merged);
           restoreBoard();
@@ -265,6 +267,12 @@ export default function Simulator({ user }: { user: SimUser | null }) {
           <div id="zoomlabel" className="mono">{zoom}%</div>
           <button onClick={() => api().zoomIn()} title="Zoom in" aria-label="Zoom in">+</button>
         </div>
+        <button className={'tbtn' + (wireTool ? ' on' : '')} aria-pressed={wireTool}
+          title="Wire tool (W) — click any grid dot to start a wire; click an existing wire to split it"
+          onClick={() => api().setWireTool(!wireTool)}>Wire</button>
+        <button className="tbtn" disabled={!sel || sel.kind === 'wire'}
+          title="Rotate selection 90° (R)"
+          onClick={() => api().rotateSelection()}>Rotate</button>
         <button className="tbtn" onClick={() => api().resetView()}>Reset view</button>
         <button className="tbtn" onClick={() => api().powerCycle()} title="Zero every signal and latch, like flipping the power">Power cycle</button>
         <button className="tbtn" disabled={!sel} onClick={() => api().deleteSelection()}>Delete</button>
@@ -342,8 +350,8 @@ export default function Simulator({ user }: { user: SimUser | null }) {
 
       <div id="statusbar">
         <span className="mono"><b>{counts.parts}</b> parts · <b>{counts.wires}</b> wires · <b>{chips.length}</b> chips</span>
-        <span>Click a <b>pin</b>, click grid dots to route, finish on a pin</span>
-        <span>Drag empty space to <b>select</b> · <kbd>⌘/⌃</kbd><kbd>C</kbd>/<kbd>V</kbd> copy &amp; paste</span>
+        <span><kbd>W</kbd> wire tool: start at any dot, split wires · click a dot twice to end in air</span>
+        <span><kbd>R</kbd> rotate · drag empty space to <b>select</b> · <kbd>⌘/⌃</kbd><kbd>C</kbd>/<kbd>V</kbd> copy &amp; paste</span>
         <span><kbd>⌫</kbd> delete · <kbd>esc</kbd> cancel · scroll to pan · <kbd>ctrl</kbd>+scroll to zoom · <kbd>space</kbd>+drag or middle-drag to pan</span>
         <span>{user ? 'Chips sync to your account' : 'Chips save to this browser — sign in to sync'}</span>
       </div>
