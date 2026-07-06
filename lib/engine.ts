@@ -5,7 +5,9 @@ export type CompType =
   | 'AND' | 'OR' | 'NOT' | 'NAND' | 'NOR' | 'XOR'
   | 'OUT' | 'IPIN' | 'OPIN' | 'CHIP';
 export interface PinRef { comp: string; pin: number }
-export interface Wire { id: string; from: PinRef; to: PinRef }
+export interface Vec { x: number; y: number }
+/* via: optional user-routed waypoints (grid-snapped), ordered from → to */
+export interface Wire { id: string; from: PinRef; to: PinRef; via?: Vec[] }
 export interface Comp {
   id: string; type: CompType; x: number; y: number;
   on?: boolean; pressed?: boolean; label?: string; chipId?: string;

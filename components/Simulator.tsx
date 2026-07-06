@@ -5,7 +5,7 @@ import {
   Board, ChipDef, ChipLib, CompType, PALETTE_ORDER, getGeom,
   makeChipDef, validateChipSource, chipUsedBy,
 } from '@/lib/engine';
-import { createEditor, EditorApi, SelInfo } from '@/components/editor';
+import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
 
 const LS_BOARD = 'latchwork.board.v1';
 const LS_CHIPS = 'latchwork.chips.v1';
@@ -82,6 +82,7 @@ export default function Simulator({ user }: { user: SimUser | null }) {
   const [sel, setSel] = useState<SelInfo | null>(null);
   const [labelDraft, setLabelDraft] = useState('');
   const [freqDraft, setFreqDraft] = useState('');
+  const [armed, setArmed] = useState<PlacingInfo | null>(null);
   const [counts, setCounts] = useState({ parts: 0, wires: 0 });
   const [zoom, setZoom] = useState(100);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -120,6 +121,7 @@ export default function Simulator({ user }: { user: SimUser | null }) {
       },
       onCounts: setCounts,
       onZoom: setZoom,
+      onPlacing: setArmed,
       onBoardChange: () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(() => {
@@ -212,6 +214,10 @@ export default function Simulator({ user }: { user: SimUser | null }) {
         <div id="appname">Latchwork<em>digital logic workbench</em></div>
         <div className="spacer" />
 
+        {sel?.kind === 'multi' && (
+          <div id="selcount" className="mono">{sel.count} parts</div>
+        )}
+
         {sel?.kind === 'comp' && sel.labelable && (
           <input
             className="labelinput mono"
@@ -274,8 +280,10 @@ export default function Simulator({ user }: { user: SimUser | null }) {
               <div className="pal-head">{head}</div>
               {types.map(t => {
                 const g = getGeom({ type: t }, {});
+                const isArmed = armed?.type === t && !armed?.chipId;
                 return (
-                  <div key={t} className="pal-item" title="Drag onto the grid"
+                  <div key={t} className={'pal-item' + (isArmed ? ' armed' : '')}
+                    title="Click, then stamp copies on the grid — esc stops"
                     onPointerDown={e => { e.preventDefault(); api().beginPlace(t); }}>
                     <PalIcon type={t} />
                     <div><div className="nm">{g.name}</div><div className="sub">{g.sub}</div></div>
@@ -293,7 +301,8 @@ export default function Simulator({ user }: { user: SimUser | null }) {
             </div>
           )}
           {chips.map(def => (
-            <div key={def.id} className="pal-item chip" title="Drag onto the grid"
+            <div key={def.id} className={'pal-item chip' + (armed?.chipId === def.id ? ' armed' : '')}
+              title="Click, then stamp copies on the grid — esc stops"
               onPointerDown={e => {
                 if ((e.target as HTMLElement).closest('.chipdel')) return;
                 e.preventDefault(); api().beginPlace('CHIP', def.id);
@@ -333,9 +342,9 @@ export default function Simulator({ user }: { user: SimUser | null }) {
 
       <div id="statusbar">
         <span className="mono"><b>{counts.parts}</b> parts · <b>{counts.wires}</b> wires · <b>{chips.length}</b> chips</span>
-        <span>Click a <b>pin</b>, then another pin to wire</span>
-        <span>Label <b>Input/Output pins</b> — they become the chip&apos;s pins when you <b>Save as chip</b></span>
-        <span><kbd>⌫</kbd> delete · <kbd>esc</kbd> cancel · scroll to zoom · drag empty space to pan</span>
+        <span>Click a <b>pin</b>, click grid dots to route, finish on a pin</span>
+        <span>Drag empty space to <b>select</b> · <kbd>⌘/⌃</kbd><kbd>C</kbd>/<kbd>V</kbd> copy &amp; paste</span>
+        <span><kbd>⌫</kbd> delete · <kbd>esc</kbd> cancel · scroll to pan · <kbd>ctrl</kbd>+scroll to zoom · <kbd>space</kbd>+drag or middle-drag to pan</span>
         <span>{user ? 'Chips sync to your account' : 'Chips save to this browser — sign in to sync'}</span>
       </div>
 
