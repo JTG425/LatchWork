@@ -1,10 +1,6 @@
 import { Auth0Client } from '@auth0/nextjs-auth0/server';
 
-const appBaseUrl =
-  process.env.NEXT_PUBLIC_APP_BASE_URL ||
-  process.env.APP_BASE_URL ||
-  process.env.VERCEL_URL && `https://${process.env.VERCEL_URL}` ||
-  'http://localhost:3000';
+const appBaseUrl = process.env.APP_BASE_URL && 'http://localhost:3000';
 
 export const authConfigured = Boolean(
   process.env.AUTH0_DOMAIN &&
