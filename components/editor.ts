@@ -6,14 +6,15 @@
    ──────────────────────────────────────────────────────────────── */
 
    import {
-    GRID, Comp, Wire, Board, ChipLib, CompType,
+    GRID, Comp, Wire, Vec, Board, ChipLib, CompType,
     SimState, newSimState, getGeom, evaluateNet,
     MULTI_IN_GATES, clampGateIns, clampFreq, CHIP_MIN_W, chipMinH,
   } from '@/lib/engine';
 
   export interface SelInfo {
-    kind: 'comp' | 'wire';
+    kind: 'comp' | 'wire' | 'multi';
     id: string;
+    count?: number;     // multi: number of selected parts
     type?: CompType;
     label?: string;
     labelable?: boolean;
@@ -21,12 +22,15 @@
     freq?: number;      // clocks
   }
 
+  export interface PlacingInfo { type: CompType; chipId?: string }
+
   export interface EditorCallbacks {
     getLib(): ChipLib;
     onSelect(info: SelInfo | null): void;
     onCounts(c: { parts: number; wires: number }): void;
     onZoom(pct: number): void;
     onBoardChange(): void;
+    onPlacing?(p: PlacingInfo | null): void;
   }
 
   export interface EditorApi {
@@ -80,12 +84,17 @@
     let sim: SimState = newSimState();
     let view = { x: 0, y: 0, k: 1 };
 
-    let sel: SelInfo | null = null;
-    let wiring: { comp: string; side: 'in' | 'out'; pin: number; mx: number; my: number; downX: number; downY: number; fresh: boolean } | null = null;
-    let drag: { id: string; ox: number; oy: number; moved: boolean; sx: number; sy: number } | null = null;
+    let selIds = new Set<string>();      // selected comps (1..n)
+    let selWire: string | null = null;   // or a single selected wire
+    let wiring: { comp: string; side: 'in' | 'out'; pin: number; via: Vec[]; mx: number; my: number; downX: number; downY: number; fresh: boolean } | null = null;
+    let drag: { ids: string[]; primary: string; offs: Record<string, { ox: number; oy: number }>; viaWires: { w: Wire; base: Vec[] }[]; orig: Record<string, Vec>; moved: boolean; sx: number; sy: number } | null = null;
     let resize: { id: string } | null = null;
     let pan: { sx: number; sy: number; vx: number; vy: number } | null = null;
-    let placing: { type: CompType; chipId?: string; mx: number; my: number; over: boolean } | null = null;
+    let marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
+    let placing: { type: CompType; chipId?: string; mx: number; my: number; over: boolean; held: boolean } | null = null;
+    let clipboard: { comps: Comp[]; wires: Wire[] } | null = null;
+    let spaceDown = false;
+    let lastPt = { x: 0, y: 0, over: false };
 
     const lib = () => cb.getLib();
 
@@ -98,6 +107,7 @@
       const p = getGeom(c, lib())[side === 'out' ? 'outs' : 'ins'][idx];
       return { x: c.x + p.x, y: c.y + p.y };
     }
+    /* auto-route: orthogonal dogleg for wires without user waypoints */
     function wirePath(x1: number, y1: number, x2: number, y2: number) {
       if (x2 >= x1 + 20) {
         const mx = snap((x1 + x2) / 2);
@@ -106,12 +116,12 @@
       const my = snap((y1 + y2) / 2);
       return `M${x1},${y1} L${x1 + 20},${y1} L${x1 + 20},${my} L${x2 - 20},${my} L${x2 - 20},${y2} L${x2},${y2}`;
     }
+    function wirePathFor(w: Wire, a: Vec, b: Vec) {
+      if (w.via?.length) return `M${a.x},${a.y} ` + w.via.map(v => `L${v.x},${v.y}`).join(' ') + ` L${b.x},${b.y}`;
+      return wirePath(a.x, a.y, b.x, b.y);
+    }
     const find = (id: string) => comps.find(c => c.id === id);
 
-    function select(next: SelInfo | null) {
-      sel = next;
-      cb.onSelect(sel);
-    }
     function selInfoFor(c: Comp): SelInfo {
       return {
         kind: 'comp', id: c.id, type: c.type, label: c.label || '',
@@ -120,6 +130,25 @@
         nIns: MULTI_IN_GATES.has(c.type) ? clampGateIns(c.nIns) : undefined,
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
       };
+    }
+    function emitSel() {
+      if (selWire) { cb.onSelect({ kind: 'wire', id: selWire }); return; }
+      if (selIds.size === 1) {
+        const c = find([...selIds][0]);
+        cb.onSelect(c ? selInfoFor(c) : null);
+        return;
+      }
+      if (selIds.size > 1) { cb.onSelect({ kind: 'multi', id: [...selIds][0], count: selIds.size }); return; }
+      cb.onSelect(null);
+    }
+    function setSelection(ids: Iterable<string>, wire: string | null = null) {
+      selIds = new Set(ids);
+      selWire = wire;
+      emitSel();
+    }
+    function setPlacing(p: typeof placing) {
+      placing = p;
+      cb.onPlacing?.(placing ? { type: placing.type, chipId: placing.chipId } : null);
     }
 
     /* ── simulation ── */
@@ -156,7 +185,7 @@
 
     function compSVG(c: Comp, ghost: boolean): string {
       const g = getGeom(c, lib());
-      const selected = !!(sel && sel.kind === 'comp' && sel.id === c.id);
+      const selected = !ghost && selIds.has(c.id);
       const selCls = selected ? ' selected' : '';
       let inner = '', stubs = '', pins = '';
       const caption = (text: string, x: number, y: number) =>
@@ -231,7 +260,7 @@
         g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start">${esc(p.name || '')}</text>`; });
         g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end">${esc(p.name || '')}</text>`; });
         if (c.label && c.label !== g.name) inner += caption(c.label, g.w / 2, g.h + 14);
-        if (selected && !ghost) {
+        if (selected) {
           // corner grip: drag to resize the chip body in grid steps
           inner += `<path class="resizegrip" d="M${g.w - 13},${g.h - 2} L${g.w - 2},${g.h - 13} M${g.w - 8},${g.h - 2} L${g.w - 2},${g.h - 8}"/>
             <rect class="resizehit" data-resize="${c.id}" x="${g.w - 16}" y="${g.h - 16}" width="22" height="22"/>`;
@@ -257,18 +286,23 @@
         const a = pinPos(fc, 'out', w.from.pin);
         const b = pinPos(tc, 'in', w.to.pin);
         const hi = sim.vals[w.from.comp + ':' + w.from.pin] | 0;
-        const selCls = sel && sel.kind === 'wire' && sel.id === w.id ? ' selected' : '';
-        const d = wirePath(a.x, a.y, b.x, b.y);
+        const selCls = selWire === w.id ? ' selected' : '';
+        const d = wirePathFor(w, a, b);
         out += `<g><path class="wirehit" data-wire="${w.id}" d="${d}"/><path class="wire${hi ? ' hi' : ''}${selCls}" d="${d}"/></g>`;
       }
       if (wiring) {
         const c = find(wiring.comp);
         if (c) {
           const p = pinPos(c, wiring.side, wiring.pin);
-          const d = wiring.side === 'out'
-            ? wirePath(p.x, p.y, wiring.mx, wiring.my)
-            : wirePath(wiring.mx, wiring.my, p.x, p.y);
+          const end = { x: snap(wiring.mx), y: snap(wiring.my) };
+          let d: string;
+          if (wiring.via.length) {
+            d = `M${p.x},${p.y} ` + wiring.via.map(v => `L${v.x},${v.y}`).join(' ') + ` L${end.x},${end.y}`;
+          } else {
+            d = wiring.side === 'out' ? wirePath(p.x, p.y, end.x, end.y) : wirePath(end.x, end.y, p.x, p.y);
+          }
           out += `<path class="wirepreview" d="${d}"/>`;
+          for (const v of wiring.via) out += `<circle class="wirestop" cx="${v.x}" cy="${v.y}" r="3"/>`;
         }
       }
       for (const c of comps) out += compSVG(c, false);
@@ -282,6 +316,12 @@
         const p = pinPos(c, 'out', +key.slice(i + 1));
         const hi = sim.vals[key] | 0;
         out += `<circle class="junction${hi ? ' hi' : ''}" cx="${p.x}" cy="${p.y}" r="5"/>`;
+      }
+
+      if (marquee) {
+        const x = Math.min(marquee.x0, marquee.x1), y = Math.min(marquee.y0, marquee.y1);
+        const w = Math.abs(marquee.x1 - marquee.x0), h = Math.abs(marquee.y1 - marquee.y0);
+        out += `<rect class="marquee" x="${x}" y="${y}" width="${w}" height="${h}"/>`;
       }
 
       if (placing && placing.over) {
@@ -299,6 +339,8 @@
       cb.onCounts({ parts: comps.length, wires: wires.length });
       cb.onZoom(Math.round(view.k * 100));
       svg.classList.toggle('wiring', !!wiring);
+      svg.classList.toggle('placing', !!placing);
+      svg.classList.toggle('panready', spaceDown);
     }
 
     function refresh(changed = true) {
@@ -313,19 +355,93 @@
       const [comp, side, pin] = (el as SVGElement).dataset.pin!.split('|');
       return { comp, side: side as 'in' | 'out', pin: +pin };
     }
-    function tryConnect(a: PinHit, b: PinHit): boolean {
+    function tryConnect(a: PinHit, b: PinHit, via: Vec[] = []): boolean {
       if (a.comp === b.comp || a.side === b.side) return false;
       const from = a.side === 'out' ? a : b;
       const to = a.side === 'out' ? b : a;
+      const path = a.side === 'out' ? via : [...via].reverse();
       wires = wires.filter(w => !(w.to.comp === to.comp && w.to.pin === to.pin));
-      wires.push({ id: uid(), from: { comp: from.comp, pin: from.pin }, to: { comp: to.comp, pin: to.pin } });
+      wires.push({
+        id: uid(), from: { comp: from.comp, pin: from.pin }, to: { comp: to.comp, pin: to.pin },
+        ...(path.length ? { via: path } : {}),
+      });
       return true;
     }
 
+    /* ── placement ── */
+    function placeAt(wx: number, wy: number) {
+      if (!placing) return;
+      const g = getGeom(placing as any, lib());
+      const c: Comp = {
+        id: uid(), type: placing.type, chipId: placing.chipId,
+        x: snap(wx - g.w / 2), y: snap(wy - g.h / 2),
+      };
+      if (placing.type === 'IN' || placing.type === 'IPIN') c.on = false;
+      if (placing.type === 'CLK') c.freq = 1;
+      comps.push(c);
+      setSelection([c.id]);
+      refresh();
+    }
+
+    /* ── selection helpers ── */
+    function marqueeSelect() {
+      if (!marquee) return;
+      const x0 = Math.min(marquee.x0, marquee.x1), x1 = Math.max(marquee.x0, marquee.x1);
+      const y0 = Math.min(marquee.y0, marquee.y1), y1 = Math.max(marquee.y0, marquee.y1);
+      selIds = new Set(comps.filter(c => {
+        const g = getGeom(c, lib());
+        return c.x < x1 && c.x + g.w > x0 && c.y < y1 && c.y + g.h > y0;
+      }).map(c => c.id));
+      selWire = null;
+    }
+
+    function copySelection() {
+      if (!selIds.size) return;
+      const cs: Comp[] = comps.filter(c => selIds.has(c.id))
+        .map(({ _ins, ...rest }) => JSON.parse(JSON.stringify(rest)));
+      const ws: Wire[] = wires.filter(w => selIds.has(w.from.comp) && selIds.has(w.to.comp))
+        .map(w => JSON.parse(JSON.stringify(w)));
+      clipboard = { comps: cs, wires: ws };
+    }
+
+    function paste() {
+      if (!clipboard?.comps.length) return;
+      const xs = clipboard.comps.map(c => c.x), ys = clipboard.comps.map(c => c.y);
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+      // paste centered on the cursor when it's over the canvas, else nudge
+      const dx = lastPt.over ? snap(lastPt.x - cx) : GRID * 2;
+      const dy = lastPt.over ? snap(lastPt.y - cy) : GRID * 2;
+      const idMap = new Map<string, string>();
+      const newComps: Comp[] = clipboard.comps.map(c => {
+        const id = uid();
+        idMap.set(c.id, id);
+        return { ...JSON.parse(JSON.stringify(c)), id, x: c.x + dx, y: c.y + dy };
+      });
+      const newWires: Wire[] = clipboard.wires.map(w => ({
+        id: uid(),
+        from: { comp: idMap.get(w.from.comp)!, pin: w.from.pin },
+        to: { comp: idMap.get(w.to.comp)!, pin: w.to.pin },
+        ...(w.via ? { via: w.via.map(v => ({ x: v.x + dx, y: v.y + dy })) } : {}),
+      }));
+      comps.push(...newComps);
+      wires.push(...newWires);
+      setSelection(newComps.map(c => c.id));
+      refresh();
+    }
+
     /* ── pointer handlers ── */
+    function startPan(e: PointerEvent) {
+      pan = { sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
+      svg.classList.add('panning');
+    }
+
     function onDown(e: PointerEvent) {
       if (e.button === 2) return;
       const pt = toWorld(e.clientX, e.clientY);
+      if (e.button === 1) { e.preventDefault(); startPan(e); return; }
+
+      if (placing) { placeAt(pt.x, pt.y); return; }   // stamp mode: every click places one
+
       const target = e.target as Element;
       const resizeEl = target.closest('[data-resize]');
       const pinEl = target.closest('[data-pin]');
@@ -340,10 +456,10 @@
       if (pinEl) {
         const p = parsePin(pinEl);
         if (wiring) {
-          if (tryConnect({ comp: wiring.comp, pin: wiring.pin, side: wiring.side }, p)) wiring = null;
+          if (tryConnect({ comp: wiring.comp, pin: wiring.pin, side: wiring.side }, p, wiring.via)) wiring = null;
           refresh();
         } else {
-          wiring = { ...p, mx: pt.x, my: pt.y, downX: e.clientX, downY: e.clientY, fresh: true };
+          wiring = { ...p, via: [], mx: pt.x, my: pt.y, downX: e.clientX, downY: e.clientY, fresh: true };
           render();
         }
         return;
@@ -351,46 +467,81 @@
       if (compEl) {
         const c = find((compEl as SVGElement).dataset.comp!);
         if (!c) return;
-        select(selInfoFor(c));
-        if (wiring) wiring = null;
+        if (wiring) wiring = null;   // clicking a component ends wire routing
+        if (e.shiftKey) {
+          // shift-click: add to / remove from the group
+          if (selIds.has(c.id)) selIds.delete(c.id); else selIds.add(c.id);
+          selWire = null;
+          emitSel();
+          render();
+          return;
+        }
+        if (!selIds.has(c.id) || selWire) setSelection([c.id]);
         if (c.type === 'BTN') c.pressed = true;
-        drag = { id: c.id, ox: pt.x - c.x, oy: pt.y - c.y, moved: false, sx: e.clientX, sy: e.clientY };
+        const offs: Record<string, { ox: number; oy: number }> = {};
+        const orig: Record<string, Vec> = {};
+        for (const id of selIds) {
+          const s = find(id);
+          if (s) { offs[id] = { ox: pt.x - s.x, oy: pt.y - s.y }; orig[id] = { x: s.x, y: s.y }; }
+        }
+        // wires routed entirely inside the group carry their waypoints along
+        const viaWires = wires
+          .filter(w => w.via?.length && selIds.has(w.from.comp) && selIds.has(w.to.comp))
+          .map(w => ({ w, base: w.via!.map(v => ({ ...v })) }));
+        drag = { ids: [...selIds], primary: c.id, offs, orig, viaWires, moved: false, sx: e.clientX, sy: e.clientY };
         refresh(false);
         return;
       }
-      if (wireEl) {
-        select({ kind: 'wire', id: (wireEl as SVGElement).dataset.wire! });
-        if (wiring) wiring = null;
+      if (wireEl && !wiring) {
+        setSelection([], (wireEl as SVGElement).dataset.wire!);
         render();
         return;
       }
-      if (wiring) { wiring = null; render(); return; }
-      select(null);
-      pan = { sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
-      svg.classList.add('panning');
+      if (wiring) {
+        // click on empty grid: drop a routing stop at the nearest dot
+        wiring.via.push({ x: snap(pt.x), y: snap(pt.y) });
+        wiring.fresh = true;
+        render();
+        return;
+      }
+      if (spaceDown) { startPan(e); return; }
+      // empty space: rubber-band select
+      setSelection([]);
+      marquee = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
       render();
     }
 
     function onMove(e: PointerEvent) {
+      const pt = toWorld(e.clientX, e.clientY);
+      {
+        const r = svg.getBoundingClientRect();
+        lastPt = { x: pt.x, y: pt.y, over: e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom };
+      }
       if (resize) {
         const c = find(resize.id);
         if (!c) { resize = null; return; }
         const def = c.chipId ? lib()[c.chipId] : undefined;
-        const pt = toWorld(e.clientX, e.clientY);
         c.w = Math.max(CHIP_MIN_W, snap(pt.x - c.x));
         c.h = Math.max(def ? chipMinH(def) : GRID * 2, snap(pt.y - c.y));
         refresh(false);
         return;
       }
       if (drag) {
-        const c = find(drag.id);
-        if (!c) { drag = null; return; }
         if (Math.abs(e.clientX - drag.sx) + Math.abs(e.clientY - drag.sy) > 4) drag.moved = true;
         if (drag.moved) {
-          if (c.type === 'BTN' && c.pressed) c.pressed = false;
-          const pt = toWorld(e.clientX, e.clientY);
-          c.x = snap(pt.x - drag.ox);
-          c.y = snap(pt.y - drag.oy);
+          for (const id of drag.ids) {
+            const c = find(id);
+            const o = drag.offs[id];
+            if (!c || !o) continue;
+            if (c.type === 'BTN' && c.pressed) c.pressed = false;
+            c.x = snap(pt.x - o.ox);
+            c.y = snap(pt.y - o.oy);
+          }
+          const p = find(drag.primary);
+          if (p && drag.orig[drag.primary]) {
+            const dx = p.x - drag.orig[drag.primary].x, dy = p.y - drag.orig[drag.primary].y;
+            for (const { w, base } of drag.viaWires) w.via = base.map(v => ({ x: v.x + dx, y: v.y + dy }));
+          }
           refresh(false);
         }
         return;
@@ -401,17 +552,20 @@
         render();
         return;
       }
+      if (marquee) {
+        marquee.x1 = pt.x; marquee.y1 = pt.y;
+        marqueeSelect();
+        render();
+        return;
+      }
       if (wiring) {
-        const pt = toWorld(e.clientX, e.clientY);
         wiring.mx = pt.x; wiring.my = pt.y;
         if (Math.abs(e.clientX - wiring.downX) + Math.abs(e.clientY - wiring.downY) > 6) wiring.fresh = false;
         render();
         return;
       }
       if (placing) {
-        const r = svg.getBoundingClientRect();
-        placing.over = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-        const pt = toWorld(e.clientX, e.clientY);
+        placing.over = lastPt.over;
         placing.mx = pt.x; placing.my = pt.y;
         render();
       }
@@ -424,46 +578,45 @@
         return;
       }
       if (drag) {
-        const c = find(drag.id);
+        const c = find(drag.primary);
         if (c && !drag.moved && (c.type === 'IN' || c.type === 'IPIN')) c.on = !c.on;
         if (c && c.type === 'BTN') c.pressed = false;
-        const moved = drag.moved;
+        // a plain click inside a group collapses the selection to that part
+        if (!drag.moved && !e.shiftKey && selIds.size > 1) setSelection([drag.primary]);
         drag = null;
-        refresh(moved || true);
+        refresh();
         return;
       }
       if (pan) { pan = null; svg.classList.remove('panning'); return; }
+      if (marquee) {
+        marquee = null;
+        emitSel();
+        render();
+        return;
+      }
       if (wiring && !wiring.fresh) {
         const el = document.elementFromPoint(e.clientX, e.clientY);
         const pinEl = el?.closest?.('[data-pin]');
         if (pinEl) {
           const p = parsePin(pinEl);
-          if (tryConnect({ comp: wiring.comp, pin: wiring.pin, side: wiring.side }, p)) wiring = null;
+          if (tryConnect({ comp: wiring.comp, pin: wiring.pin, side: wiring.side }, p, wiring.via)) wiring = null;
           refresh();
         }
         if (wiring) wiring.fresh = true;   // stay in click-click mode
         return;
       }
       if (wiring) { wiring.fresh = false; return; }
-      if (placing) {
-        if (placing.over) {
-          const g = getGeom(placing as any, lib());
-          const c: Comp = {
-            id: uid(), type: placing.type, chipId: placing.chipId,
-            x: snap(placing.mx - g.w / 2), y: snap(placing.my - g.h / 2),
-          };
-          if (placing.type === 'IN' || placing.type === 'IPIN') c.on = false;
-          if (placing.type === 'CLK') c.freq = 1;
-          comps.push(c);
-          select(selInfoFor(c));
-        }
-        placing = null;
-        refresh();
+      if (placing && placing.held) {
+        // finish of the arming gesture: a drag out of the palette places here
+        if (placing.over) placeAt(placing.mx, placing.my);
+        placing.held = false;
       }
     }
 
     function onContext(e: MouseEvent) {
       e.preventDefault();
+      if (wiring) { wiring = null; render(); return; }
+      if (placing) { setPlacing(null); render(); return; }
       const target = e.target as Element;
       const compEl = target.closest('[data-comp]');
       const wireEl = target.closest('[data-wire]');
@@ -473,21 +626,40 @@
 
     function onWheel(e: WheelEvent) {
       e.preventDefault();
-      const r = svg.getBoundingClientRect();
-      const cx = e.clientX - r.left, cy = e.clientY - r.top;
-      const factor = Math.exp(-e.deltaY * 0.0016);
-      const k = Math.min(2.5, Math.max(0.35, view.k * factor));
-      view.x = cx - (cx - view.x) * (k / view.k);
-      view.y = cy - (cy - view.y) * (k / view.k);
-      view.k = k;
+      if (e.ctrlKey || e.metaKey) {
+        // pinch / ctrl+scroll zooms about the cursor
+        const r = svg.getBoundingClientRect();
+        const cx = e.clientX - r.left, cy = e.clientY - r.top;
+        const factor = Math.exp(-e.deltaY * 0.0025);
+        const k = Math.min(2.5, Math.max(0.35, view.k * factor));
+        view.x = cx - (cx - view.x) * (k / view.k);
+        view.y = cy - (cy - view.y) * (k / view.k);
+        view.k = k;
+      } else {
+        view.x -= e.deltaX;
+        view.y -= e.deltaY;
+      }
       render();
     }
 
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'BUTTON')) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === 'c') { copySelection(); e.preventDefault(); return; }
+      if (mod && e.key.toLowerCase() === 'v') { paste(); e.preventDefault(); return; }
+      if (e.key === ' ') { spaceDown = true; svg.classList.add('panready'); e.preventDefault(); return; }
       if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); deleteSelection(); }
-      if (e.key === 'Escape') { wiring = null; placing = null; select(null); render(); }
+      if (e.key === 'Escape') {
+        if (wiring) { wiring = null; render(); return; }
+        if (placing) { setPlacing(null); render(); return; }
+        if (marquee) { marquee = null; render(); return; }
+        setSelection([]);
+        render();
+      }
+    }
+    function onKeyUp(e: KeyboardEvent) {
+      if (e.key === ' ') { spaceDown = false; svg.classList.remove('panready'); }
     }
 
     /* ── mutations ── */
@@ -495,13 +667,22 @@
       comps = comps.filter(c => c.id !== id);
       wires = wires.filter(w => w.from.comp !== id && w.to.comp !== id);
       delete sim.sub[id];
-      if (sel?.id === id) select(null);
+      if (selIds.has(id)) { selIds.delete(id); emitSel(); }
       refresh();
     }
     function deleteSelection() {
-      if (!sel) return;
-      if (sel.kind === 'comp') deleteComp(sel.id);
-      else { wires = wires.filter(w => w.id !== sel!.id); select(null); refresh(); }
+      if (selWire) {
+        wires = wires.filter(w => w.id !== selWire);
+        setSelection([]);
+        refresh();
+        return;
+      }
+      if (!selIds.size) return;
+      comps = comps.filter(c => !selIds.has(c.id));
+      wires = wires.filter(w => !selIds.has(w.from.comp) && !selIds.has(w.to.comp));
+      selIds.forEach(id => delete sim.sub[id]);
+      setSelection([]);
+      refresh();
     }
 
     /* ── wire up ── */
@@ -511,14 +692,24 @@
     svg.addEventListener('contextmenu', onContext);
     svg.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
 
     refresh(false);
 
     /* ── public API ── */
     return {
-      beginPlace(type, chipId) { placing = { type, chipId, mx: 0, my: 0, over: false }; },
+      beginPlace(type, chipId) {
+        if (placing && placing.type === type && placing.chipId === chipId) {
+          setPlacing(null);     // clicking the armed palette item again disarms
+          render();
+          return;
+        }
+        wiring = null;
+        setPlacing({ type, chipId, mx: 0, my: 0, over: false, held: true });
+        render();
+      },
       deleteSelection,
-      clear() { comps = []; wires = []; sim = newSimState(); select(null); wiring = null; refresh(); },
+      clear() { comps = []; wires = []; sim = newSimState(); setSelection([]); wiring = null; refresh(); },
       powerCycle() { sim = newSimState(); refresh(false); },
       zoomIn() { view.k = Math.min(2.5, view.k * 1.2); render(); },
       zoomOut() { view.k = Math.max(0.35, view.k / 1.2); render(); },
@@ -532,7 +723,7 @@
         if (!c || !MULTI_IN_GATES.has(c.type)) return;
         c.nIns = clampGateIns(n);
         wires = wires.filter(w => !(w.to.comp === id && w.to.pin >= c.nIns!));
-        if (sel?.id === id) select(selInfoFor(c));
+        if (selIds.has(id)) emitSel();
         refresh();
       },
       setFreq(id, hz) {
@@ -553,7 +744,7 @@
         wires = (b.wires || []).filter(w =>
           comps.some(c => c.id === w.from.comp) && comps.some(c => c.id === w.to.comp));
         sim = newSimState();
-        select(null);
+        setSelection([]);
         refresh(false);
       },
       removeChipInstances(chipId) {
@@ -562,7 +753,7 @@
         comps = comps.filter(c => !doomed.has(c.id));
         wires = wires.filter(w => !doomed.has(w.from.comp) && !doomed.has(w.to.comp));
         doomed.forEach(id => delete sim.sub[id]);
-        if (sel && doomed.has(sel.id)) select(null);
+        if ([...selIds].some(id => doomed.has(id))) setSelection([...selIds].filter(id => !doomed.has(id)));
         refresh();
       },
       rerender() { refresh(false); },
@@ -574,6 +765,7 @@
         svg.removeEventListener('contextmenu', onContext);
         svg.removeEventListener('wheel', onWheel);
         window.removeEventListener('keydown', onKey);
+        window.removeEventListener('keyup', onKeyUp);
       },
     };
   }
