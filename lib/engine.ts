@@ -4,17 +4,100 @@ export type CompType =
   | 'IN' | 'BTN' | 'ONE' | 'CLK'
   | 'AND' | 'OR' | 'NOT' | 'NAND' | 'NOR' | 'XOR'
   | 'OUT' | 'IPIN' | 'OPIN' | 'CHIP';
-export interface PinRef { comp: string; pin: number }
 export interface Vec { x: number; y: number }
-/* via: optional user-routed waypoints (grid-snapped), ordered from → to */
-export interface Wire { id: string; from: PinRef; to: PinRef; via?: Vec[] }
+/* A wire end is a component pin, a solder split on another wire, or a
+   free (dangling) point on the grid. */
+export interface PinEnd { comp: string; side: 'in' | 'out'; pin: number }
+export interface AttachEnd { wire: string; x: number; y: number }
+export type WireEnd = PinEnd | AttachEnd | Vec;
+export const isPinEnd = (e: WireEnd): e is PinEnd => (e as PinEnd).comp !== undefined;
+export const isAttachEnd = (e: WireEnd): e is AttachEnd => (e as AttachEnd).wire !== undefined;
+/* via: optional user-routed waypoints (grid-snapped), ordered a → b */
+export interface Wire { id: string; a: WireEnd; b: WireEnd; via?: Vec[] }
 export interface Comp {
   id: string; type: CompType; x: number; y: number;
   on?: boolean; pressed?: boolean; label?: string; chipId?: string;
+  rot?: number;           // 0 right (default), 1 down, 2 left, 3 up
   nIns?: number;          // gates: input count (2–4)
   w?: number; h?: number; // chips: user-resized body, grid multiples
   freq?: number;          // CLK: full cycles per second
   _ins?: number[];
+}
+
+/* Older saves used directed { from: output pin, to: input pin } wires. */
+export function normalizeWires(list: unknown): Wire[] {
+  if (!Array.isArray(list)) return [];
+  return list.map((w: any) => {
+    if (w && w.from && w.to) {
+      return {
+        id: w.id,
+        a: { comp: w.from.comp, side: 'out' as const, pin: w.from.pin },
+        b: { comp: w.to.comp, side: 'in' as const, pin: w.to.pin },
+        ...(w.via ? { via: w.via } : {}),
+      };
+    }
+    return w as Wire;
+  });
+}
+export const migrateChipDef = (def: ChipDef): ChipDef =>
+  ({ ...def, wires: normalizeWires(def.wires) });
+
+/* Nets: wires joined end-to-end (including splits onto other wires)
+   form one electrical node. Every input pin on a net reads the OR of
+   every output pin on it. */
+export interface NetInfo {
+  inputDrivers: Map<string, string[]>;  // 'comp:pinIdx' → out-pin value keys 'comp:pinIdx'
+  wireOuts: Map<string, string[]>;      // wire id → out-pin value keys on its net
+  pinWireCounts: Map<string, number>;   // 'comp:side:pin' → wire ends attached
+}
+export function analyzeNets(wires: Wire[]): NetInfo {
+  const parent = new Map<string, string>();
+  const add = (k: string) => { if (!parent.has(k)) parent.set(k, k); };
+  const root = (k: string): string => {
+    let r = k;
+    while (parent.get(r) !== r) r = parent.get(r)!;
+    parent.set(k, r);
+    return r;
+  };
+  const union = (x: string, y: string) => {
+    add(x); add(y);
+    const rx = root(x), ry = root(y);
+    if (rx !== ry) parent.set(rx, ry);
+  };
+  const pinWireCounts = new Map<string, number>();
+  for (const w of wires) {
+    add('w:' + w.id);
+    for (const e of [w.a, w.b]) {
+      if (isPinEnd(e)) {
+        union('w:' + w.id, `p:${e.comp}:${e.side}:${e.pin}`);
+        const ck = `${e.comp}:${e.side}:${e.pin}`;
+        pinWireCounts.set(ck, (pinWireCounts.get(ck) || 0) + 1);
+      } else if (isAttachEnd(e)) {
+        union('w:' + w.id, 'w:' + e.wire);
+      }
+    }
+  }
+  const outsByRoot = new Map<string, string[]>();
+  for (const k of [...parent.keys()]) {
+    if (!k.startsWith('p:')) continue;
+    const [, comp, side, pin] = k.split(':');
+    if (side !== 'out') continue;
+    const r = root(k);
+    let list = outsByRoot.get(r);
+    if (!list) { list = []; outsByRoot.set(r, list); }
+    list.push(`${comp}:${pin}`);
+  }
+  const inputDrivers = new Map<string, string[]>();
+  const wireOuts = new Map<string, string[]>();
+  for (const k of [...parent.keys()]) {
+    if (k.startsWith('p:')) {
+      const [, comp, side, pin] = k.split(':');
+      if (side === 'in') inputDrivers.set(`${comp}:${pin}`, outsByRoot.get(root(k)) ?? []);
+    } else {
+      wireOuts.set(k.slice(2), outsByRoot.get(root(k)) ?? []);
+    }
+  }
+  return { inputDrivers, wireOuts, pinWireCounts };
 }
 export interface Board { comps: Comp[]; wires: Wire[] }
 export interface ChipDef { id: string; name: string; inputs: string[]; outputs: string[]; inputComps: string[]; outputComps: string[]; comps: Comp[]; wires: Wire[]; createdAt: number }
@@ -111,18 +194,20 @@ function evalPrim(c: Comp, ins: number[], now: number): number[] {
   }
 }
 
+const orOverKeys = (state: SimState, keys?: string[]) => {
+  let v = 0;
+  if (keys) for (const k of keys) v |= state.vals[k] | 0;
+  return v;
+};
+
 export function evaluateNet(comps: Comp[], wires: Wire[], state: SimState, lib: ChipLib, boundIns?: Map<string, number>, depth = 0, now = Date.now()): void {
   if (depth > 12) return;
-  const byDest = new Map<string, Wire>();
-  for (const w of wires) byDest.set(w.to.comp + ':' + w.to.pin, w);
+  const nets = analyzeNets(wires);
   const passes = Math.min(24, Math.max(6, comps.length + 2));
   for (let k = 0; k < passes; k++) {
     for (const c of comps) {
       const g = getGeom(c, lib);
-      const ins = g.ins.map((_, i) => {
-        const w = byDest.get(c.id + ':' + i);
-        return w ? (state.vals[w.from.comp + ':' + w.from.pin] | 0) : 0;
-      });
+      const ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
       c._ins = ins;
       let outs: number[];
       if (c.type === 'CHIP') {
@@ -141,10 +226,8 @@ export function evaluateNet(comps: Comp[], wires: Wire[], state: SimState, lib: 
 export function evalChip(def: ChipDef, state: SimState, ins: number[], lib: ChipLib, depth = 0, now = Date.now()): number[] {
   const bound = new Map(def.inputComps.map((id, i) => [id, ins[i] | 0]));
   evaluateNet(def.comps, def.wires, state, lib, bound, depth, now);
-  return def.outputComps.map(id => {
-    const w = def.wires.find(w => w.to.comp === id && w.to.pin === 0);
-    return w ? (state.vals[w.from.comp + ':' + w.from.pin] | 0) : 0;
-  });
+  const nets = analyzeNets(def.wires);
+  return def.outputComps.map(id => orOverKeys(state, nets.inputDrivers.get(id + ':0')));
 }
 
 export interface ChipValidation { ok: boolean; reason?: string }

@@ -27,13 +27,18 @@ Install `playwright` in a scratch dir and launch with the pre-installed browser:
   and `latchwork.chips.v1` (ChipDef[]). Gotcha: init scripts re-run on `page.reload()`
   and clobber localStorage again — use a fresh context per scenario.
 - **Coordinates**: view starts at identity, so client = board `getBoundingClientRect()`
-  origin + world coords. Comps snap to a 20px grid.
+  origin + world coords. Comps snap to a 20px grid. Wires are `{ id, a, b, via? }` where an
+  end is a pin `{comp, side, pin}`, a split `{wire, x, y}`, or a free point `{x, y}`; signal
+  values resolve per net (OR of all output pins on connected wires). Gotcha: Playwright's
+  CDP mouse never fires native `dblclick` — use the same-dot-twice path instead.
 - **Interactions**: click a comp body to select (switches/IPINs toggle on click-without-drag);
   click pin → click empty grid dots (waypoints) → click pin to route a wire; drag empty space
   for marquee multi-select; ⌘/Ctrl+C/V copy-paste (paste lands at cursor); palette items arm a
   stamp mode on click (every canvas click places one; esc or re-click disarms); scroll pans,
   ctrl+scroll/pinch zooms, space- or middle-drag pans; selected chips expose a `[data-resize]`
-  corner grip.
+  corner grip. R (or the Rotate button) rotates the selection in quarter turns; W (or the
+  Wire button) toggles the wire tool — with it on, any grid dot or existing wire (split)
+  can start/end a wire, and clicking the same dot twice ends a wire in the air.
 - **Assertions**: query the rendered SVG — `.wire.hi`, `.junction`, `.marquee`, `.wirestop`,
   `.comp.selected`, `[data-pin^="<id>|in"]`, `.chipbody` width/height, `.lbl` captions.
   Board saves to localStorage ~400ms (debounced) after changes — wait comfortably past it
