@@ -10,7 +10,7 @@ import { createEditor, EditorApi, SelInfo } from '@/components/editor';
 const LS_BOARD = 'latchwork.board.v1';
 const LS_CHIPS = 'latchwork.chips.v1';
 
-export interface SimUser { name?: string | null; email?: string | null }
+export interface SimUser { id?: string | null; name?: string | null; email?: string | null }
 
 /* Starter circuit: SR latch built from NANDs — press SET / RESET
    buttons and watch it remember. Shows off persistent state. */
