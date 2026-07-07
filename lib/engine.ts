@@ -2,11 +2,14 @@ import { GATE_DEFS, GATE_TYPES, GateType, isGateType } from './gates';
 
 export const GRID = 20;
 
-/* Gate types come from the lib/gates registry — one file per gate. */
+/* Gate types come from the lib/gates registry — one file per gate.
+   SSEG = one-digit 7-segment display (8 segment inputs, a–g + dp),
+   COMB = bit combiner (up to 4 bits → one bus value, MSB first),
+   TUN  = tunnel (named wireless net link). */
 export type CompType =
   | 'IN' | 'BTN' | 'ONE' | 'CLK'
   | GateType
-  | 'OUT' | 'IPIN' | 'OPIN' | 'CHIP';
+  | 'OUT' | 'SSEG' | 'COMB' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP';
 export interface Vec { x: number; y: number }
 /* A wire end is a component pin, a solder split on another wire, or a
    free (dangling) point on the grid. */
@@ -15,8 +18,13 @@ export interface AttachEnd { wire: string; x: number; y: number }
 export type WireEnd = PinEnd | AttachEnd | Vec;
 export const isPinEnd = (e: WireEnd): e is PinEnd => (e as PinEnd).comp !== undefined;
 export const isAttachEnd = (e: WireEnd): e is AttachEnd => (e as AttachEnd).wire !== undefined;
-/* via: optional user-routed waypoints (grid-snapped), ordered a → b */
-export interface Wire { id: string; a: WireEnd; b: WireEnd; via?: Vec[] }
+/* via: optional user-routed waypoints (grid-snapped), ordered a → b;
+   bits: bus width (1 = plain wire). Signal values are plain integers,
+   so a net carries a whole bus value; `bits` sets how it's masked and
+   displayed. */
+export interface Wire { id: string; a: WireEnd; b: WireEnd; via?: Vec[]; bits?: number }
+export const MAX_WIRE_BITS = 8;
+export const clampBits = (n?: number) => Math.min(MAX_WIRE_BITS, Math.max(1, Math.round(n ?? 1)));
 export interface Comp {
   id: string; type: CompType; x: number; y: number;
   on?: boolean; pressed?: boolean; label?: string; chipId?: string;
@@ -53,7 +61,23 @@ export interface NetInfo {
   wireOuts: Map<string, string[]>;      // wire id → out-pin value keys on its net
   pinWireCounts: Map<string, number>;   // 'comp:side:pin' → wire ends attached
 }
-export function analyzeNets(wires: Wire[]): NetInfo {
+/* Tunnels: every TUN comp with the same (non-empty) name joins one
+   net, as if an invisible wire connected them. Returns groups of pin
+   keys for analyzeNets to union. */
+export function tunnelPinGroups(comps: Comp[]): string[][] {
+  const byLabel = new Map<string, string[]>();
+  for (const c of comps) {
+    if (c.type !== 'TUN') continue;
+    const label = (c.label || '').trim();
+    if (!label) continue;
+    let list = byLabel.get(label);
+    if (!list) { list = []; byLabel.set(label, list); }
+    list.push(`p:${c.id}:in:0`);
+  }
+  return [...byLabel.values()].filter(g => g.length > 1);
+}
+
+export function analyzeNets(wires: Wire[], unionPins?: string[][]): NetInfo {
   const parent = new Map<string, string>();
   const add = (k: string) => { if (!parent.has(k)) parent.set(k, k); };
   const root = (k: string): string => {
@@ -78,6 +102,11 @@ export function analyzeNets(wires: Wire[]): NetInfo {
       } else if (isAttachEnd(e)) {
         union('w:' + w.id, 'w:' + e.wire);
       }
+    }
+  }
+  if (unionPins) {
+    for (const group of unionPins) {
+      for (let i = 1; i < group.length; i++) union(group[0], group[i]);
     }
   }
   const outsByRoot = new Map<string, string[]>();
@@ -108,8 +137,12 @@ export type ChipLib = Record<string, ChipDef>;
 export interface SimState { vals: Record<string, number>; sub: Record<string, SimState> }
 export const newSimState = (): SimState => ({ vals: {}, sub: {} });
 
-export interface Pin { x: number; y: number; name?: string }
+export interface Pin { x: number; y: number; name?: string; bits?: number }
 export interface CompGeom { w: number; h: number; ins: Pin[]; outs: Pin[]; name: string; sub: string }
+
+/* Segment pin order for the 7-segment display: the classic a–g ring
+   plus the decimal point. */
+export const SEG_NAMES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dp'] as const;
 
 /* Gate geometry lives with each gate in lib/gates; PRIM only holds the
    remaining non-gate primitives. */
@@ -119,14 +152,27 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
   ONE: { name: 'Constant 1', sub: 'always high', w: 40, h: 40, ins: [], outs: [{ x: 60, y: 20 }] },
   CLK: { name: 'Clock', sub: 'square wave', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
   OUT: { name: 'LED', sub: 'output', w: 40, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
+  SSEG: {
+    name: '7-Segment', sub: 'digit display', w: 100, h: 160,
+    // one pin per segment, top to bottom: a b c d e f g dp
+    ins: Array.from({ length: 8 }, (_, i) => ({ x: -20, y: i * GRID, name: SEG_NAMES[i] })),
+    outs: [],
+  },
+  COMB: {
+    name: 'Bit combiner', sub: 'bits → bus', w: 60, h: 60,
+    ins: Array.from({ length: 4 }, (_, i) => ({ x: -20, y: i * GRID })),
+    outs: [{ x: 80, y: 30, bits: 4 }],
+  },
+  TUN: { name: 'Tunnel', sub: 'named link', w: 80, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
   IPIN: { name: 'Input pin', sub: 'chip input', w: 40, h: 40, ins: [], outs: [{ x: 60, y: 20 }] },
   OPIN: { name: 'Output pin', sub: 'chip output', w: 40, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
 };
 
 export const PALETTE_ORDER: [string, CompType[]][] = [
-  ['Inputs', ['IN', 'BTN', 'ONE', 'CLK']],
+  ['Input', ['IN', 'BTN', 'ONE', 'CLK']],
   ['Gates', [...GATE_TYPES]],
-  ['Outputs', ['OUT']],
+  ['Output', ['OUT', 'SSEG']],
+  ['Bus & routing', ['COMB', 'TUN']],
   ['Chip pins', ['IPIN', 'OPIN']],
 ];
 
@@ -174,6 +220,17 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'w' | 'h'>, l
     }
     return base;
   }
+  if (c.type === 'COMB') {
+    // like a multi-input gate: 2–4 bit inputs (MSB on top), one 4-bit bus out
+    const n = clampGateIns(c.nIns ?? 4);
+    const h = Math.max(40, (n - 1) * GRID);
+    const step = h / (n - 1);
+    return {
+      ...PRIM.COMB, h,
+      ins: Array.from({ length: n }, (_, i) => ({ x: -20, y: Math.round(i * step) })),
+      outs: [{ x: 80, y: h / 2, bits: 4 }],
+    };
+  }
   return PRIM[c.type];
 }
 
@@ -185,6 +242,12 @@ function evalPrim(c: Comp, ins: number[], now: number): number[] {
     case 'BTN': return [c.pressed ? 1 : 0];
     case 'ONE': return [1];
     case 'CLK': { const half = 500 / clampFreq(c.freq); return [Math.floor(now / half) % 2]; }
+    case 'COMB': {
+      // first pin is the MSB; unused high bits pad with 0 automatically
+      let v = 0;
+      for (const b of ins) v = (v << 1) | (b ? 1 : 0);
+      return [v];
+    }
     default: return [];
   }
 }
@@ -197,7 +260,7 @@ const orOverKeys = (state: SimState, keys?: string[]) => {
 
 export function evaluateNet(comps: Comp[], wires: Wire[], state: SimState, lib: ChipLib, boundIns?: Map<string, number>, depth = 0, now = Date.now()): void {
   if (depth > 12) return;
-  const nets = analyzeNets(wires);
+  const nets = analyzeNets(wires, tunnelPinGroups(comps));
   const passes = Math.min(24, Math.max(6, comps.length + 2));
   for (let k = 0; k < passes; k++) {
     for (const c of comps) {
@@ -221,7 +284,7 @@ export function evaluateNet(comps: Comp[], wires: Wire[], state: SimState, lib: 
 export function evalChip(def: ChipDef, state: SimState, ins: number[], lib: ChipLib, depth = 0, now = Date.now()): number[] {
   const bound = new Map(def.inputComps.map((id, i) => [id, ins[i] | 0]));
   evaluateNet(def.comps, def.wires, state, lib, bound, depth, now);
-  const nets = analyzeNets(def.wires);
+  const nets = analyzeNets(def.wires, tunnelPinGroups(def.comps));
   return def.outputComps.map(id => orOverKeys(state, nets.inputDrivers.get(id + ':0')));
 }
 

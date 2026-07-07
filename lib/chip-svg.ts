@@ -97,6 +97,25 @@ function compMarkup(c: Comp, lib: ChipLib): string {
     inner = `<rect class="body" x="0" y="0" width="40" height="40" rx="10"/>
       <circle cx="20" cy="20" r="11" fill="#33333b" stroke="#4a4a54" stroke-width="1.5"/>` +
       caption(c.label || 'LED', 20, 52);
+  } else if (c.type === 'SSEG') {
+    const ox = 42, oy = 26, W = 36, H = 104, my = oy + H / 2;
+    const seg = (d: string) => `<path d="${d}" class="seg"/>`;
+    inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="9"/>
+      <rect x="28" y="8" width="${g.w - 36}" height="${g.h - 16}" rx="7" fill="#141417"/>`
+      + seg(`M${ox + 4},${oy} H${ox + W - 4}`) + seg(`M${ox + W},${oy + 4} V${my - 4}`)
+      + seg(`M${ox + W},${my + 4} V${oy + H - 4}`) + seg(`M${ox + 4},${oy + H} H${ox + W - 4}`)
+      + seg(`M${ox},${my + 4} V${oy + H - 4}`) + seg(`M${ox},${oy + 4} V${my - 4}`)
+      + seg(`M${ox + 4},${my} H${ox + W - 4}`)
+      + `<circle cx="${ox + W + 12}" cy="${oy + H}" r="4.5" class="seg"/>`
+      + caption(c.label || '7-SEG', g.w / 2, g.h + 14);
+  } else if (c.type === 'TUN') {
+    inner = `<path class="body tunnelbody" d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z"/>
+      <text class="tunnelname" x="46" y="24"${ctr(46, 20)}>${esc(c.label?.trim() || '?')}</text>` +
+      caption('TUNNEL', 40, 52);
+  } else if (c.type === 'COMB') {
+    inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>0000</text>` +
+      caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
   } else if (c.type === 'CHIP') {
     inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
       <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
@@ -153,7 +172,7 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
     } else {
       d = wirePath(a.x, a.y, b.x, b.y);
     }
-    out += `<path class="wire" d="${d}"/>`;
+    out += `<path class="wire${(w.bits ?? 1) > 1 ? ' bus' : ''}" d="${d}"/>`;
   }
   for (const c of comps) out += compMarkup(c, lib);
 

@@ -16,6 +16,10 @@ import { AuthPublicConfig } from '@/lib/auth-embedded';
 const LS_BOARD = 'latchwork.board.v1';   // legacy single-board key, migrated into tabs
 const LS_CHIPS = 'latchwork.chips.v1';
 const LS_TABS = 'latchwork.tabs.v1';
+const LS_PAL = 'latchwork.palette.v1';   // { collapsed: {head: bool}, width: px }
+
+const PAL_MIN_W = 120, PAL_MAX_W = 420, PAL_DEF_W = 186;
+const clampPalW = (w: number) => Math.min(PAL_MAX_W, Math.max(PAL_MIN_W, Math.round(w)));
 
 export interface SimUser { id?: string | null; name?: string | null; email?: string | null }
 
@@ -77,6 +81,9 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     case 'ONE': body = <><rect x="0" y="0" width="40" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--hi)" fontSize="17" fontWeight="700" fontFamily="ui-monospace,Menlo,monospace">1</text></>; break;
     case 'CLK': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M10,27 H19 V13 H29 V27 H39 V13 H49" fill="none" stroke="var(--hi)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" /></>; break;
     case 'OUT': body = <><rect x="0" y="0" width="40" height="40" rx="10" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="20" cy="20" r="11" fill="var(--led-on)" stroke="#ff6b61" strokeWidth="1.5" /></>; break;
+    case 'SSEG': body = <><rect x="0" y="0" width="100" height="160" rx="9" fill={fill} stroke={stroke} strokeWidth="2.5" /><rect x="28" y="8" width="64" height="144" rx="7" fill="#141417" /><text x="60" y="118" textAnchor="middle" fill="var(--led-on)" fontSize="96" fontFamily="ui-monospace,Menlo,monospace">8</text></>; break;
+    case 'TUN': body = <><path d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x="46" y="25" textAnchor="middle" fill="var(--muted)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">T1</text></>; break;
+    case 'COMB': body = <><rect x="0" y="0" width="60" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,0 H0 M-8,20 H0 M-8,40 H0 M-8,60 H0 M60,30 H70" stroke="var(--lo)" strokeWidth="2" /><text x="30" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
     case 'IPIN': body = <><rect x="0" y="0" width="40" height="40" rx="7" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'OPIN': body = <><circle cx="20" cy="20" r="19" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'CHIP': body = <><rect x="0" y="0" width={g.w} height={g.h} rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="12" cy="10" r="2.5" fill="var(--muted)" /></>; break;
@@ -118,7 +125,37 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const [activeTab, setActiveTab] = useState('');
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [palWidth, setPalWidth] = useState(PAL_DEF_W);
+  const collapsedRef = useRef<Record<string, boolean>>({});
+  const palWidthRef = useRef(PAL_DEF_W);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const persistPal = () => {
+    try {
+      localStorage.setItem(LS_PAL, JSON.stringify({ collapsed: collapsedRef.current, width: palWidthRef.current }));
+    } catch {}
+  };
+  const toggleGroup = (head: string) => {
+    collapsedRef.current = { ...collapsedRef.current, [head]: !collapsedRef.current[head] };
+    setCollapsed(collapsedRef.current);
+    persistPal();
+  };
+  const startPalResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX, startW = palWidthRef.current;
+    const move = (ev: PointerEvent) => {
+      palWidthRef.current = clampPalW(startW + ev.clientX - startX);
+      setPalWidth(palWidthRef.current);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      persistPal();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
 
   const lib: ChipLib = useMemo(() => Object.fromEntries(chips.map(c => [c.id, c])), [chips]);
 
@@ -246,6 +283,12 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       },
     });
     apiRef.current = ed;
+
+    try {
+      const p = JSON.parse(localStorage.getItem(LS_PAL) || 'null');
+      if (p && typeof p.width === 'number') { palWidthRef.current = clampPalW(p.width); setPalWidth(palWidthRef.current); }
+      if (p && p.collapsed && typeof p.collapsed === 'object') { collapsedRef.current = p.collapsed; setCollapsed(p.collapsed); }
+    } catch {}
 
     let local: ChipDef[] = [];
     try { local = (JSON.parse(localStorage.getItem(LS_CHIPS) || '[]') as ChipDef[]).map(migrateChipDef); } catch {}
@@ -393,6 +436,20 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           />
         )}
 
+        {sel?.kind === 'wire' && (
+          <div id="bitsgrp" title="Bus width — how many bits this wire carries">
+            <span>bits</span>
+            {[1, 2, 4, 8].map(n => (
+              <button
+                key={n}
+                className={sel.bits === n ? 'on' : ''}
+                aria-pressed={sel.bits === n}
+                onClick={() => api().setWireBits(sel.id, n)}
+              >{n}</button>
+            ))}
+          </div>
+        )}
+
         {sel?.kind === 'comp' && sel.nIns != null && (
           <div id="ningrp" title="Number of inputs">
             <span>inputs</span>
@@ -453,11 +510,14 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       </div>
 
       <div id="main">
-        <nav id="palette" aria-label="Component palette">
+        <nav id="palette" aria-label="Component palette" style={{ width: palWidth }}>
           {PALETTE_ORDER.map(([head, types]) => (
-            <div key={head}>
-              <div className="pal-head">{head}</div>
-              {types.map(t => {
+            <div key={head} className="pal-group">
+              <button className={'pal-head' + (collapsed[head] ? ' closed' : '')}
+                aria-expanded={!collapsed[head]} onClick={() => toggleGroup(head)}>
+                <span className="chev" aria-hidden="true">▾</span>{head}
+              </button>
+              {!collapsed[head] && types.map(t => {
                 const g = getGeom({ type: t }, {});
                 const isArmed = armed?.type === t && !armed?.chipId;
                 return (
@@ -472,36 +532,47 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
             </div>
           ))}
 
-          <div className="pal-head">My chips</div>
-          {chips.length === 0 && (
-            <div className="pal-empty">
-              Build a circuit with <b>Input</b> and <b>Output pins</b>, then <b>Save as chip</b> to package it
-              here — like a D flip-flop you can reuse anywhere.
-            </div>
-          )}
-          {chips.map(def => (
-            <div key={def.id} className={'pal-item chip' + (armed?.chipId === def.id ? ' armed' : '')}
-              title="Click to stamp copies on the grid — double-click to edit the internals"
-              onPointerDown={e => {
-                if ((e.target as HTMLElement).closest('.chipdel,.chipinfo')) return;
-                e.preventDefault(); placeChip(def);
-              }}
-              onDoubleClick={e => {
-                if ((e.target as HTMLElement).closest('.chipdel,.chipinfo')) return;
-                askEditChip(def.id);
-              }}>
-              <PalIcon type="CHIP" chip={def} />
-              <div style={{ minWidth: 0 }}>
-                <div className="nm ellip">{def.name}</div>
-                <div className="sub">{def.inputs.length} in · {def.outputs.length} out</div>
-              </div>
-              <button className="chipinfo" aria-label={`Inspect ${def.name} — truth table and state machine`}
-                title="Truth table & state machine" onClick={() => setInspect(def)}>i</button>
-              <button className="chipdel" aria-label={`Delete ${def.name}`} title="Delete chip"
-                onClick={() => deleteChip(def)}>×</button>
-            </div>
-          ))}
+          <div className="pal-group">
+            <button className={'pal-head' + (collapsed['My chips'] ? ' closed' : '')}
+              aria-expanded={!collapsed['My chips']} onClick={() => toggleGroup('My chips')}>
+              <span className="chev" aria-hidden="true">▾</span>My chips
+            </button>
+            {!collapsed['My chips'] && (
+              <>
+                {chips.length === 0 && (
+                  <div className="pal-empty">
+                    Build a circuit with <b>Input</b> and <b>Output pins</b>, then <b>Save as chip</b> to package it
+                    here — like a D flip-flop you can reuse anywhere.
+                  </div>
+                )}
+                {chips.map(def => (
+                  <div key={def.id} className={'pal-item chip' + (armed?.chipId === def.id ? ' armed' : '')}
+                    title="Click to stamp copies on the grid — double-click to edit the internals"
+                    onPointerDown={e => {
+                      if ((e.target as HTMLElement).closest('.chipdel,.chipinfo')) return;
+                      e.preventDefault(); placeChip(def);
+                    }}
+                    onDoubleClick={e => {
+                      if ((e.target as HTMLElement).closest('.chipdel,.chipinfo')) return;
+                      askEditChip(def.id);
+                    }}>
+                    <PalIcon type="CHIP" chip={def} />
+                    <div style={{ minWidth: 0 }}>
+                      <div className="nm ellip">{def.name}</div>
+                      <div className="sub">{def.inputs.length} in · {def.outputs.length} out</div>
+                    </div>
+                    <button className="chipinfo" aria-label={`Inspect ${def.name} — truth table and state machine`}
+                      title="Truth table & state machine" onClick={() => setInspect(def)}>i</button>
+                    <button className="chipdel" aria-label={`Delete ${def.name}`} title="Delete chip"
+                      onClick={() => deleteChip(def)}>×</button>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
         </nav>
+        <div id="palresize" role="separator" aria-orientation="vertical" aria-label="Resize palette"
+          title="Drag to resize the palette" onPointerDown={startPalResize} />
 
         <div id="canvaswrap">
           <svg id="board" ref={svgRef} xmlns="http://www.w3.org/2000/svg">
