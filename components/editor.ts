@@ -34,6 +34,8 @@
     onBoardChange(): void;
     onPlacing?(p: PlacingInfo | null): void;
     onWireTool?(on: boolean): void;
+    /* double-click on a placed chip — Simulator offers to open its internals */
+    onChipDblClick?(chipId: string): void;
   }
 
   export interface EditorApi {
@@ -643,7 +645,14 @@
     }
 
     function onDblClick(e: MouseEvent) {
-      if (!wiring) return;
+      if (!wiring) {
+        const compEl = (e.target as Element).closest?.('[data-comp]');
+        if (compEl) {
+          const c = find((compEl as SVGElement).dataset.comp!);
+          if (c && c.type === 'CHIP' && c.chipId) cb.onChipDblClick?.(c.chipId);
+        }
+        return;
+      }
       const pt = toWorld(e.clientX, e.clientY);
       const dot: Vec = { x: snap(pt.x), y: snap(pt.y) };
       // the double-click's first press already dropped a via here — undo it
