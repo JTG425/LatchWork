@@ -248,3 +248,29 @@ export function chipUsedBy(chipId: string, lib: ChipLib): string | null {
   }
   return null;
 }
+
+/* Transitive custom-chip dependencies of a def (itself excluded) —
+   used to bundle everything a shared chip needs to simulate. */
+export function collectChipDeps(def: ChipDef, lib: ChipLib): ChipDef[] {
+  const seen = new Set<string>([def.id]);
+  const out: ChipDef[] = [];
+  const visit = (d: ChipDef, depth: number) => {
+    if (depth > 12) return;
+    for (const c of d.comps) {
+      if (c.type !== 'CHIP' || !c.chipId || seen.has(c.chipId)) continue;
+      seen.add(c.chipId);
+      const dep = lib[c.chipId];
+      if (dep) { out.push(dep); visit(dep, depth + 1); }
+    }
+  };
+  visit(def, 0);
+  return out;
+}
+
+/* Does def (or any chip nested inside it) contain targetId? Guards
+   against a chip ending up inside its own internals. */
+export function chipDefContains(def: ChipDef, targetId: string, lib: ChipLib, depth = 0): boolean {
+  if (depth > 12) return false;
+  return def.comps.some(c => c.type === 'CHIP' && !!c.chipId &&
+    (c.chipId === targetId || (!!lib[c.chipId] && chipDefContains(lib[c.chipId], targetId, lib, depth + 1))));
+}

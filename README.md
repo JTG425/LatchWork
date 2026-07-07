@@ -9,6 +9,17 @@ This zip is configured to use Auth0 only. NextAuth and GitHub OAuth have been re
 - Auth0 users store chips in Vercel Blob under their own Auth0 `sub` path: `users/<auth0-sub>/chips.json`.
 - The `/api/chips` route always derives the user from the Auth0 session. The client never chooses which user path to read or write.
 
+## Workbench features
+
+- **Editor tabs** — the bottom bar works like a spreadsheet's sheet tabs: `+` opens a blank canvas, double-click renames, `×` closes. All tabs (and which one was active) persist to `localStorage` (`latchwork.tabs.v1`; old single-board saves migrate automatically).
+- **Chip inspector** — the `i` button on any saved chip (palette → My chips) opens an auto-generated report: the abstracted chip drawing with a toggle to view its internals, a simulated **truth table**, and for stateful chips a minimized **state machine diagram** (see `lib/analyze.ts`). The same report is shown for community chips.
+- **Edit chip internals** — double-click a custom chip (on the canvas or in the palette) and confirm to open its internal circuit in a new editor tab; **Update chip** in the titlebar applies the changes to every placed copy.
+- **Community chips** — the *Community* button opens a storefront (80% of the screen) backed by the blob store under `communitychips/`:
+  - `communitychips/index.json` — listing summaries
+  - `communitychips/<id>.json` — full chip (definition + bundled nested-chip dependencies)
+  - `communitychips/<id>.comments.json` — reviews
+  - Anyone can browse, search, filter, and **Add to my chips**. Uploading and reviewing require an Auth0 account; the API derives the author from the session and publishes only a display name.
+
 ## Setup
 
 1. Copy `.env.example` to `.env.local`.

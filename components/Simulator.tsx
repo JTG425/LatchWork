@@ -1,19 +1,29 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Board, ChipDef, ChipLib, CompType, PALETTE_ORDER, getGeom,
-  makeChipDef, validateChipSource, chipUsedBy, migrateChipDef,
+  makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
 import AuthDialog from '@/components/AuthDialog';
+import CommunityDialog from '@/components/CommunityDialog';
+import ChipAnalysis, { ChipPreview } from '@/components/ChipAnalysis';
+import LogoMark from '@/components/Logo';
 import { AuthPublicConfig } from '@/lib/auth-embedded';
 
-const LS_BOARD = 'latchwork.board.v1';
+const LS_BOARD = 'latchwork.board.v1';   // legacy single-board key, migrated into tabs
 const LS_CHIPS = 'latchwork.chips.v1';
+const LS_TABS = 'latchwork.tabs.v1';
 
 export interface SimUser { id?: string | null; name?: string | null; email?: string | null }
+
+/* One editor canvas. `chipId` marks a tab that edits a chip's internals. */
+interface TabInfo { id: string; name: string; chipId?: string }
+interface TabData extends TabInfo { board: Board }
+const tabMeta = ({ board: _b, ...meta }: TabData): TabInfo => meta;
+const newTabId = () => 'tab_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 /* Starter circuit: SR latch built from NANDs — press SET / RESET
    buttons and watch it remember. Shows off persistent state. */
@@ -86,6 +96,8 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const apiRef = useRef<EditorApi | null>(null);
   const chipsRef = useRef<ChipLib>({});
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tabsRef = useRef<TabData[]>([]);
+  const activeTabRef = useRef<string>('');
 
   const [chips, setChipsState] = useState<ChipDef[]>([]);
   const [sel, setSel] = useState<SelInfo | null>(null);
@@ -99,7 +111,16 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const [chipName, setChipName] = useState('');
   const [toast, setToast] = useState<string | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
+  const [communityOpen, setCommunityOpen] = useState(false);
+  const [inspect, setInspect] = useState<ChipDef | null>(null);
+  const [editAsk, setEditAsk] = useState<ChipDef | null>(null);
+  const [tabs, setTabs] = useState<TabInfo[]>([]);
+  const [activeTab, setActiveTab] = useState('');
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const lib: ChipLib = useMemo(() => Object.fromEntries(chips.map(c => [c.id, c])), [chips]);
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
@@ -121,7 +142,88 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     }
   }, [user]);
 
-  /* ── mount: editor, then chips, then board ── */
+  /* ── tabs ── */
+  const syncActiveBoard = useCallback(() => {
+    const t = tabsRef.current.find(t => t.id === activeTabRef.current);
+    if (t && apiRef.current) t.board = apiRef.current.getBoard();
+  }, []);
+
+  const persistTabs = useCallback(() => {
+    try {
+      localStorage.setItem(LS_TABS, JSON.stringify({ tabs: tabsRef.current, active: activeTabRef.current }));
+    } catch {}
+  }, []);
+
+  const publishTabs = useCallback(() => {
+    setTabs(tabsRef.current.map(tabMeta));
+  }, []);
+
+  const switchTab = useCallback((id: string) => {
+    if (id === activeTabRef.current) return;
+    const t = tabsRef.current.find(t => t.id === id);
+    if (!t) return;
+    syncActiveBoard();
+    activeTabRef.current = id;
+    setActiveTab(id);
+    apiRef.current!.setBoard(t.board);
+    persistTabs();
+  }, [syncActiveBoard, persistTabs]);
+
+  const addTab = useCallback((name?: string, board?: Board, chipId?: string) => {
+    syncActiveBoard();
+    const sheets = tabsRef.current.filter(t => !t.chipId).length;
+    const t: TabData = {
+      id: newTabId(),
+      name: (name ?? `Sheet ${sheets + 1}`).slice(0, 20),
+      board: board ?? { comps: [], wires: [] },
+      ...(chipId ? { chipId } : {}),
+    };
+    tabsRef.current.push(t);
+    activeTabRef.current = t.id;
+    setActiveTab(t.id);
+    publishTabs();
+    apiRef.current!.setBoard(t.board);
+    persistTabs();
+  }, [syncActiveBoard, publishTabs, persistTabs]);
+
+  const closeTab = useCallback((id: string) => {
+    if (tabsRef.current.length <= 1) { notify('That’s the last tab — clear it instead.'); return; }
+    const idx = tabsRef.current.findIndex(t => t.id === id);
+    if (idx < 0) return;
+    tabsRef.current.splice(idx, 1);
+    if (activeTabRef.current === id) {
+      const next = tabsRef.current[Math.max(0, idx - 1)];
+      activeTabRef.current = next.id;
+      setActiveTab(next.id);
+      apiRef.current!.setBoard(next.board);
+    }
+    publishTabs();
+    persistTabs();
+  }, [notify, publishTabs, persistTabs]);
+
+  const renameTab = useCallback((id: string, name: string) => {
+    const t = tabsRef.current.find(t => t.id === id);
+    if (t && name.trim()) t.name = name.trim().slice(0, 20);
+    setRenaming(null);
+    publishTabs();
+    persistTabs();
+  }, [publishTabs, persistTabs]);
+
+  /* Open a chip's internals for editing in its own tab (one per chip). */
+  const openChipTab = useCallback((def: ChipDef) => {
+    setEditAsk(null);
+    setInspect(null);
+    const existing = tabsRef.current.find(t => t.chipId === def.id);
+    if (existing) { switchTab(existing.id); return; }
+    addTab(def.name, JSON.parse(JSON.stringify({ comps: def.comps, wires: def.wires })), def.id);
+  }, [switchTab, addTab]);
+
+  const askEditChip = useCallback((chipId: string) => {
+    const def = chipsRef.current[chipId];
+    if (def) setEditAsk(def);
+  }, []);
+
+  /* ── mount: editor, then chips, then tabs/boards ── */
   useEffect(() => {
     const ed = createEditor(svgRef.current!, {
       getLib: () => chipsRef.current,
@@ -134,10 +236,12 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       onZoom: setZoom,
       onPlacing: setArmed,
       onWireTool: setWireTool,
+      onChipDblClick: askEditChip,
       onBoardChange: () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(() => {
-          try { localStorage.setItem(LS_BOARD, JSON.stringify(ed.getBoard())); } catch {}
+          syncActiveBoard();
+          persistTabs();
         }, 400);
       },
     });
@@ -148,11 +252,27 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     setChips(local, false);
     chipsRef.current = Object.fromEntries(local.map(c => [c.id, c]));
 
-    const restoreBoard = () => {
-      try {
-        const saved = localStorage.getItem(LS_BOARD);
-        ed.setBoard(saved ? JSON.parse(saved) : seedBoard());
-      } catch { ed.setBoard(seedBoard()); }
+    const restoreTabs = () => {
+      let data: { tabs?: TabData[]; active?: string } | null = null;
+      try { data = JSON.parse(localStorage.getItem(LS_TABS) || 'null'); } catch {}
+      let loaded = Array.isArray(data?.tabs)
+        ? data!.tabs!.filter(t => t && typeof t.id === 'string' && t.board)
+        : [];
+      if (!loaded.length) {
+        // migrate the old single-board save into the first tab
+        let legacy: Board | null = null;
+        try {
+          const saved = localStorage.getItem(LS_BOARD);
+          legacy = saved ? JSON.parse(saved) : null;
+        } catch {}
+        loaded = [{ id: newTabId(), name: 'Sheet 1', board: legacy ?? seedBoard() }];
+      }
+      tabsRef.current = loaded;
+      const active = loaded.some(t => t.id === data?.active) ? data!.active! : loaded[0].id;
+      activeTabRef.current = active;
+      setActiveTab(active);
+      setTabs(loaded.map(tabMeta));
+      try { ed.setBoard(loaded.find(t => t.id === active)!.board); } catch { ed.setBoard(seedBoard()); }
     };
 
     if (user) {
@@ -163,11 +283,11 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           for (const c of remote || []) if (!byId.has(c.id)) byId.set(c.id, migrateChipDef(c));
           const merged = [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
           setChips(merged);
-          restoreBoard();
+          restoreTabs();
         })
-        .catch(restoreBoard);
+        .catch(restoreTabs);
     } else {
-      restoreBoard();
+      restoreTabs();
     }
 
     return () => ed.destroy();
@@ -175,6 +295,9 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   }, []);
 
   /* ── actions ── */
+  const activeMeta = tabs.find(t => t.id === activeTab);
+  const editingChip = activeMeta?.chipId ? chips.find(c => c.id === activeMeta.chipId) : undefined;
+
   const openSaveChip = () => {
     const board = apiRef.current!.getBoard();
     const v = validateChipSource(board);
@@ -192,12 +315,43 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     notify(`Saved “${def.name}” — it’s in your palette under My chips.`);
   };
 
+  /* Apply the current tab's board back onto the chip it edits. */
+  const updateChip = () => {
+    if (!editingChip) return;
+    const board = apiRef.current!.getBoard();
+    const v = validateChipSource(board);
+    if (!v.ok) { notify(v.reason!); return; }
+    const rebuilt = makeChipDef(editingChip.name, board);
+    const updated: ChipDef = { ...rebuilt, id: editingChip.id, createdAt: editingChip.createdAt };
+    setChips(chips.map(c => (c.id === editingChip.id ? updated : c)));
+    notify(`Updated “${editingChip.name}” — every placed copy now uses the new internals.`);
+  };
+
   const deleteChip = (def: ChipDef) => {
     const usedBy = chipUsedBy(def.id, chipsRef.current);
     if (usedBy) { notify(`Can’t delete “${def.name}” — it’s used inside “${usedBy}”.`); return; }
     apiRef.current!.removeChipInstances(def.id);
     setChips(chips.filter(c => c.id !== def.id));
     notify(`Deleted “${def.name}”.`);
+  };
+
+  const placeChip = (def: ChipDef) => {
+    const curChipId = tabsRef.current.find(t => t.id === activeTabRef.current)?.chipId;
+    if (curChipId && (def.id === curChipId || chipDefContains(def, curChipId, chipsRef.current))) {
+      notify(`Can’t place “${def.name}” here — a chip can’t contain itself.`);
+      return;
+    }
+    apiRef.current!.beginPlace('CHIP', def.id);
+  };
+
+  /* Community chips arrive with their nested deps bundled — keep only
+     the ones we don't already have. */
+  const addCommunityChips = (defs: ChipDef[]) => {
+    const have = new Set(chips.map(c => c.id));
+    const fresh = defs.filter(d => d && !have.has(d.id)).map(migrateChipDef);
+    if (!fresh.length) { notify(`“${defs[0]?.name}” is already in your library.`); return; }
+    setChips([...chips, ...fresh]);
+    notify(`Added “${defs[0].name}” to My chips${fresh.length > 1 ? ` (+${fresh.length - 1} nested chip${fresh.length > 2 ? 's' : ''})` : ''}.`);
   };
 
   const onLabelChange = (v: string) => {
@@ -213,7 +367,6 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
 
   const clearBoard = () => {
     apiRef.current!.clear();
-    try { localStorage.setItem(LS_BOARD, JSON.stringify({ comps: [], wires: [] })); } catch {}
   };
 
   const api = () => apiRef.current!;
@@ -222,7 +375,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   return (
     <div id="app">
       <div id="titlebar">
-        <div id="appname">Latchwork<em>digital logic workbench</em></div>
+        <div id="appname"><LogoMark size={22} />Latchwork<em>digital logic workbench</em></div>
         <div className="spacer" />
 
         {sel?.kind === 'multi' && (
@@ -286,7 +439,12 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         <button className="tbtn" onClick={() => api().powerCycle()} title="Zero every signal and latch, like flipping the power">Power cycle</button>
         <button className="tbtn" disabled={!sel} onClick={() => api().deleteSelection()}>Delete</button>
         <button className="tbtn danger" onClick={clearBoard}>Clear</button>
-        <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>
+        <button className="tbtn" onClick={() => setCommunityOpen(true)}
+          title="Browse chips shared by other builders — or share your own">Community</button>
+        {editingChip
+          ? <button className="tbtn primary" onClick={updateChip}
+              title={`Apply this circuit as the new internals of “${editingChip.name}”`}>Update chip</button>
+          : <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>}
         {user
           ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a>
           : auth
@@ -323,16 +481,22 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           )}
           {chips.map(def => (
             <div key={def.id} className={'pal-item chip' + (armed?.chipId === def.id ? ' armed' : '')}
-              title="Click, then stamp copies on the grid — esc stops"
+              title="Click to stamp copies on the grid — double-click to edit the internals"
               onPointerDown={e => {
-                if ((e.target as HTMLElement).closest('.chipdel')) return;
-                e.preventDefault(); api().beginPlace('CHIP', def.id);
+                if ((e.target as HTMLElement).closest('.chipdel,.chipinfo')) return;
+                e.preventDefault(); placeChip(def);
+              }}
+              onDoubleClick={e => {
+                if ((e.target as HTMLElement).closest('.chipdel,.chipinfo')) return;
+                askEditChip(def.id);
               }}>
               <PalIcon type="CHIP" chip={def} />
               <div style={{ minWidth: 0 }}>
                 <div className="nm ellip">{def.name}</div>
                 <div className="sub">{def.inputs.length} in · {def.outputs.length} out</div>
               </div>
+              <button className="chipinfo" aria-label={`Inspect ${def.name} — truth table and state machine`}
+                title="Truth table & state machine" onClick={() => setInspect(def)}>i</button>
               <button className="chipdel" aria-label={`Delete ${def.name}`} title="Delete chip"
                 onClick={() => deleteChip(def)}>×</button>
             </div>
@@ -361,6 +525,43 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         </div>
       </div>
 
+      <div id="tabbar" role="tablist" aria-label="Editor tabs">
+        <div className="tabscroll">
+          {tabs.map(t => (
+            <div key={t.id} role="tab" aria-selected={t.id === activeTab}
+              className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '')}
+              title={t.chipId ? `Editing the internals of “${t.name}” — double-click to rename` : 'Double-click to rename'}
+              onPointerDown={() => switchTab(t.id)}
+              onDoubleClick={() => { setRenaming(t.id); setRenameDraft(t.name); }}>
+              {t.chipId && <span className="edtab-dot" aria-hidden="true" />}
+              {renaming === t.id ? (
+                <input
+                  autoFocus
+                  className="edtab-rename mono"
+                  value={renameDraft}
+                  maxLength={20}
+                  onChange={e => setRenameDraft(e.target.value)}
+                  onBlur={() => renameTab(t.id, renameDraft)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') renameTab(t.id, renameDraft);
+                    if (e.key === 'Escape') setRenaming(null);
+                  }}
+                  onPointerDown={e => e.stopPropagation()}
+                />
+              ) : (
+                <span className="edtab-name ellip">{t.name}</span>
+              )}
+              {tabs.length > 1 && (
+                <button className="edtab-close" aria-label={`Close ${t.name}`}
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={() => closeTab(t.id)}>×</button>
+              )}
+            </div>
+          ))}
+        </div>
+        <button className="edtab-add" title="New editor tab" aria-label="New editor tab" onClick={() => addTab()}>+</button>
+      </div>
+
       <div id="statusbar">
         <span className="mono"><b>{counts.parts}</b> parts · <b>{counts.wires}</b> wires · <b>{chips.length}</b> chips</span>
         <span><kbd>W</kbd> wire tool: start at any dot, split wires · click a dot twice to end in air</span>
@@ -370,6 +571,54 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       </div>
 
       {authOpen && auth && <AuthDialog auth={auth} onClose={() => setAuthOpen(false)} />}
+
+      {communityOpen && (
+        <CommunityDialog
+          user={user}
+          chips={chips}
+          onAdd={addCommunityChips}
+          onSignIn={() => setAuthOpen(true)}
+          onClose={() => setCommunityOpen(false)}
+          notify={notify}
+        />
+      )}
+
+      {inspect && (
+        <div className="overlay" onPointerDown={e => { if (e.target === e.currentTarget) setInspect(null); }}>
+          <div className="dialog inspectdialog" role="dialog" aria-modal="true" aria-label={`${inspect.name} — behavior`}>
+            <div className="inspect-head">
+              <h2>{inspect.name}</h2>
+              <span className="community-card-meta">{inspect.inputs.length} in · {inspect.outputs.length} out</span>
+              <div className="spacer" />
+              <button className="community-close" aria-label="Close" onClick={() => setInspect(null)}>×</button>
+            </div>
+            <div className="inspect-body">
+              <ChipPreview def={inspect} lib={lib} tall />
+              <ChipAnalysis def={inspect} lib={lib} />
+            </div>
+            <div className="dialog-actions">
+              <button className="tbtn" onClick={() => askEditChip(inspect.id)}>Edit internals…</button>
+              <button className="tbtn primary" onClick={() => setInspect(null)}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editAsk && (
+        <div className="overlay" onPointerDown={e => { if (e.target === e.currentTarget) setEditAsk(null); }}>
+          <div className="dialog" role="dialog" aria-modal="true" aria-label="Edit chip internals">
+            <h2>Edit the internals of “{editAsk.name}”?</h2>
+            <p>
+              Its circuit opens in a <b>new editor tab</b> (bottom bar). Rework the logic, then press{' '}
+              <b>Update chip</b> to apply the changes to every placed copy.
+            </p>
+            <div className="dialog-actions">
+              <button className="tbtn" onClick={() => setEditAsk(null)}>No, leave it</button>
+              <button className="tbtn primary" autoFocus onClick={() => openChipTab(editAsk)}>Yes, open editor tab</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {dialogOpen && (
         <div className="overlay" onPointerDown={e => { if (e.target === e.currentTarget) setDialogOpen(false); }}>
