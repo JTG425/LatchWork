@@ -6,10 +6,11 @@
    ──────────────────────────────────────────────────────────────── */
 
    import {
-    GRID, Comp, Wire, WireEnd, Vec, Board, ChipLib, CompType,
+    GRID, Comp, Wire, WireEnd, PinEnd, Vec, Board, ChipLib, CompType,
     SimState, newSimState, getGeom, evaluateNet, analyzeNets,
-    normalizeWires, isPinEnd, isAttachEnd,
-    MULTI_IN_GATES, clampGateIns, clampFreq, CHIP_MIN_W, chipMinH,
+    normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
+    MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, CHIP_MIN_W, chipMinH,
+    SEG_NAMES,
   } from '@/lib/engine';
   import { GATE_DEFS, isGateType } from '@/lib/gates';
 
@@ -20,8 +21,9 @@
     type?: CompType;
     label?: string;
     labelable?: boolean;
-    nIns?: number;      // gates with an editable input count
+    nIns?: number;      // gates / bit combiners with an editable input count
     freq?: number;      // clocks
+    bits?: number;      // wires: bus width
   }
 
   export interface PlacingInfo { type: CompType; chipId?: string }
@@ -51,6 +53,7 @@
     setLabel(id: string, label: string): void;
     setNumInputs(id: string, n: number): void;
     setFreq(id: string, hz: number): void;
+    setWireBits(id: string, bits: number): void;
     getBoard(): Board;
     setBoard(b: Board): void;
     removeChipInstances(chipId: string): void;
@@ -89,6 +92,9 @@
 
   const esc = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  const SUPS = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+  const sup = (n: number) => SUPS[n] ?? String(n);
 
   export function createEditor(svg: SVGSVGElement, cb: EditorCallbacks): EditorApi {
     const world = svg.querySelector('#world') as SVGGElement;
@@ -157,13 +163,19 @@
       return {
         kind: 'comp', id: c.id, type: c.type, label: c.label || '',
         labelable: c.type === 'IN' || c.type === 'BTN' || c.type === 'OUT' || c.type === 'CHIP'
-          || c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'CLK',
-        nIns: MULTI_IN_GATES.has(c.type) ? clampGateIns(c.nIns) : undefined,
+          || c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'CLK'
+          || c.type === 'TUN' || c.type === 'SSEG',
+        nIns: MULTI_IN_GATES.has(c.type) || c.type === 'COMB'
+          ? clampGateIns(c.nIns ?? (c.type === 'COMB' ? 4 : 2)) : undefined,
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
       };
     }
     function emitSel() {
-      if (selWire) { cb.onSelect({ kind: 'wire', id: selWire }); return; }
+      if (selWire) {
+        const w = wires.find(x => x.id === selWire);
+        cb.onSelect({ kind: 'wire', id: selWire, bits: clampBits(w?.bits) });
+        return;
+      }
       if (selIds.size === 1) {
         const c = find([...selIds][0]);
         cb.onSelect(c ? selInfoFor(c) : null);
@@ -303,6 +315,42 @@
             stroke="${lit ? '#ff6b61' : '#4a4a54'}" stroke-width="1.5" ${lit ? 'filter="url(#ledglow)"' : ''}/>
           ${lit ? '<circle cx="16.5" cy="16.5" r="3" fill="#ffd7d4" opacity=".85"/>' : ''}` +
           caption(c.label || 'LED', 20, 52);
+      } else if (c.type === 'SSEG') {
+        /* One digit, driven pin-per-segment (a b c d e f g dp, top to
+           bottom). Classic segment ring in a 36×104 box. */
+        const on = (i: number) => (c._ins?.[i] ?? 0) ? 1 : 0;
+        const ox = 42, oy = 26, W = 36, H = 104, my = oy + H / 2;
+        const seg = (i: number, d: string) =>
+          `<path d="${d}" class="seg${on(i) ? ' hi' : ''}" ${on(i) ? 'filter="url(#ledglow)"' : ''}/>`;
+        inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="9"/>
+          <rect x="28" y="8" width="${g.w - 36}" height="${g.h - 16}" rx="7" fill="#141417"/>`
+          + seg(0, `M${ox + 4},${oy} H${ox + W - 4}`)                    // a
+          + seg(1, `M${ox + W},${oy + 4} V${my - 4}`)                    // b
+          + seg(2, `M${ox + W},${my + 4} V${oy + H - 4}`)                // c
+          + seg(3, `M${ox + 4},${oy + H} H${ox + W - 4}`)                // d
+          + seg(4, `M${ox},${my + 4} V${oy + H - 4}`)                    // e
+          + seg(5, `M${ox},${oy + 4} V${my - 4}`)                        // f
+          + seg(6, `M${ox + 4},${my} H${ox + W - 4}`)                    // g
+          + `<circle cx="${ox + W + 12}" cy="${oy + H}" r="4.5" class="seg${on(7) ? ' hi' : ''}" ${on(7) ? 'filter="url(#ledglow)"' : ''}/>`;
+        g.ins.forEach((p, i) => {
+          inner += `<text class="pinname" x="10" y="${p.y + 3}" text-anchor="start"${ctr(10, p.y)}>${SEG_NAMES[i]}</text>`;
+        });
+        inner += caption(c.label || '7-SEG', g.w / 2, g.h + 14);
+      } else if (c.type === 'TUN') {
+        const lit = c._ins?.[0] ?? 0;
+        inner = `<path class="body tunnelbody${lit ? ' hi' : ''}" d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z"/>
+          <text class="tunnelname${c.label?.trim() ? '' : ' unset'}" x="46" y="24"${ctr(46, 20)}>${esc(c.label?.trim() || 'name?')}</text>` +
+          caption('TUNNEL', 40, 52);
+      } else if (c.type === 'COMB') {
+        const v = sim.vals[c.id + ':0'] | 0;
+        const n = g.ins.length;
+        inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${(v & 15).toString(2).padStart(4, '0')}</text>`;
+        g.ins.forEach((p, i) => {
+          // MSB on top: label each pin with its bit weight
+          inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>2${sup(n - 1 - i)}</text>`;
+        });
+        inner += caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
       } else if (c.type === 'CHIP') {
         inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
           <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
@@ -329,7 +377,7 @@
     function render() {
       let out = `<rect x="-20000" y="-20000" width="40000" height="40000" fill="url(#dots)"/>`;
 
-      const nets = analyzeNets(wires);
+      const nets = analyzeNets(wires, tunnelPinGroups(comps));
       const netVal = (keys?: string[]) => {
         let v = 0;
         if (keys) for (const k of keys) v |= sim.vals[k] | 0;
@@ -342,7 +390,14 @@
         const hi = netVal(nets.wireOuts.get(w.id));
         const selCls = selWire === w.id ? ' selected' : '';
         const d = wirePathFor(w, a, b);
-        out += `<g><path class="wirehit" data-wire="${w.id}" d="${d}"/><path class="wire${hi ? ' hi' : ''}${selCls}" d="${d}"/></g>`;
+        const bits = clampBits(w.bits);
+        out += `<g><path class="wirehit" data-wire="${w.id}" d="${d}"/><path class="wire${bits > 1 ? ' bus' : ''}${hi ? ' hi' : ''}${selCls}" d="${d}"/></g>`;
+        if (bits > 1) {
+          // live bus readout, MSB first, padded to the wire's width
+          const v = hi & ((1 << bits) - 1);
+          out += `<text class="buslabel${hi ? ' hi' : ''}" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 9}"
+            text-anchor="middle">${v.toString(2).padStart(bits, '0')}</text>`;
+        }
       }
       if (wiring) {
         const p = endPos(wiring.start);
@@ -418,16 +473,28 @@
       const [comp, side, pin] = (el as SVGElement).dataset.pin!.split('|');
       return { comp, side: side as 'in' | 'out', pin: +pin };
     }
+    /* Bus pins (e.g. the combiner's 4-bit output) seed the wire's width. */
+    function pinBits(e: WireEnd): number {
+      if (!isPinEnd(e)) return 1;
+      const c = find(e.comp);
+      if (!c) return 1;
+      const g = getGeom(c, lib());
+      return g[e.side === 'out' ? 'outs' : 'ins'][e.pin]?.bits ?? 1;
+    }
     function buildWire(a: WireEnd, b: WireEnd, via: Vec[]): boolean {
       if (isPinEnd(a) && isPinEnd(b)) {
         if (a.comp === b.comp) return false;
-        if (a.side === b.side) return false;
+        // tunnels are junctions, not consumers — their pin may join
+        // either side of a net (e.g. tunnel → LED input is fine)
+        const isTun = (e: PinEnd) => find(e.comp)?.type === 'TUN';
+        if (a.side === b.side && !isTun(a) && !isTun(b)) return false;
       }
       if (!isPinEnd(a) && !isPinEnd(b) && !isAttachEnd(a) && !isAttachEnd(b)) {
         const av = a as Vec, bv = b as Vec;
         if (av.x === bv.x && av.y === bv.y && !via.length) return false;
       }
-      wires.push({ id: uid(), a, b, ...(via.length ? { via } : {}) });
+      const bits = Math.max(pinBits(a), pinBits(b));
+      wires.push({ id: uid(), a, b, ...(via.length ? { via } : {}), ...(bits > 1 ? { bits } : {}) });
       return true;
     }
     function finishWire(end: WireEnd) {
@@ -456,6 +523,7 @@
       };
       if (placing.type === 'IN' || placing.type === 'IPIN') c.on = false;
       if (placing.type === 'CLK') c.freq = 1;
+      if (placing.type === 'COMB') c.nIns = 4;
       comps.push(c);
       setSelection([c.id]);
       refresh();
@@ -897,7 +965,7 @@
       },
       setNumInputs(id, n) {
         const c = find(id);
-        if (!c || !MULTI_IN_GATES.has(c.type)) return;
+        if (!c || !(MULTI_IN_GATES.has(c.type) || c.type === 'COMB')) return;
         c.nIns = clampGateIns(n);
         wires = wires.filter(w => ![w.a, w.b].some(e =>
           isPinEnd(e) && e.comp === id && e.side === 'in' && e.pin >= c.nIns!));
@@ -909,6 +977,14 @@
         const c = find(id);
         if (!c || c.type !== 'CLK') return;
         c.freq = clampFreq(hz);
+        refresh();
+      },
+      setWireBits(id, bits) {
+        const w = wires.find(w => w.id === id);
+        if (!w) return;
+        const b = clampBits(bits);
+        if (b > 1) w.bits = b; else delete w.bits;
+        if (selWire === id) emitSel();
         refresh();
       },
       getBoard(): Board {
