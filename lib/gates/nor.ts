@@ -9,7 +9,7 @@ export const NOR: GateDef = {
   h: 40,
   ins: TWO_IN,
   outs: ONE_OUT,
-  eval: ins => (ins.some(v => v) ? 0 : 1),
+  eval: ins => (ins.some(v => v ? 1 : 0) ? 0 : 1),
   body: h => {
     const t = -8, b = h + 8, m = h / 2;
     return `M3,${t} H20 C38,${t} 50,${m - 16} 55,${m} C50,${m + 16} 38,${b} 20,${b} H3 C13,${m + 12} 13,${m - 12} 3,${t} Z`;

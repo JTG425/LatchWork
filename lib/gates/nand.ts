@@ -9,7 +9,7 @@ export const NAND: GateDef = {
   h: 40,
   ins: TWO_IN,
   outs: ONE_OUT,
-  eval: ins => (ins.every(v => v) ? 0 : 1),
+  eval: ins => (ins.every(v => v ? 1 : 0) ? 0 : 1),
   body: h => {
     const t = -8, b = h + 8, m = h / 2;
     return `M4,${t} H28 C48,${t} 56,${m - 16} 56,${m} C56,${m + 16} 48,${b} 28,${b} H4 Z`;

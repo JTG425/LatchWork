@@ -9,7 +9,7 @@ export const XOR: GateDef = {
   h: 40,
   ins: TWO_IN,
   outs: ONE_OUT,
-  eval: ins => ins.reduce((a, v) => a ^ v, 0),
+  eval: ins => ins.reduce((a, v) => a ^ (v ? 1 : 0), 0),
   body: h => {
     const t = -8, b = h + 8, m = h / 2;
     return `M9,${t} H26 C45,${t} 55,${m - 16} 60,${m} C55,${m + 16} 45,${b} 26,${b} H9 C19,${m + 12} 19,${m - 12} 9,${t} Z`;
