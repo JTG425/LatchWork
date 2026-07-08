@@ -6,11 +6,11 @@
    ──────────────────────────────────────────────────────────────── */
 
    import {
-    GRID, Comp, Wire, WireEnd, PinEnd, Vec, Board, ChipLib, CompType,
+    GRID, Comp, Wire, WireEnd, PinEnd, Vec, Board, ChipLib, CompType, EdgeMode,
     SimState, newSimState, getGeom, evaluateNet, analyzeNets,
     normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
     MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, CHIP_MIN_W, chipMinH,
-    SEG_NAMES,
+    SEG_NAMES, edgeableComp,
   } from '@/lib/engine';
   import { GATE_DEFS, isGateType } from '@/lib/gates';
 
@@ -24,6 +24,8 @@
     nIns?: number;      // gates / bit combiners with an editable input count
     freq?: number;      // clocks
     bits?: number;      // wires: bus width
+    edgeable?: boolean; // gates/chips can be sampled on a clock edge
+    edge?: EdgeMode;
   }
 
   export interface PlacingInfo { type: CompType; chipId?: string }
@@ -53,6 +55,7 @@
     setLabel(id: string, label: string): void;
     setNumInputs(id: string, n: number): void;
     setFreq(id: string, hz: number): void;
+    setEdge(id: string, edge: EdgeMode | null): void;
     setWireBits(id: string, bits: number): void;
     getBoard(): Board;
     setBoard(b: Board): void;
@@ -95,6 +98,7 @@
 
   const SUPS = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
   const sup = (n: number) => SUPS[n] ?? String(n);
+  const edgeText = (c: Pick<Comp, 'edge'>) => c.edge === 'rise' ? ' / rise' : c.edge === 'fall' ? ' / fall' : '';
 
   export function createEditor(svg: SVGSVGElement, cb: EditorCallbacks): EditorApi {
     const world = svg.querySelector('#world') as SVGGElement;
@@ -168,6 +172,8 @@
         nIns: MULTI_IN_GATES.has(c.type) || c.type === 'COMB'
           ? clampGateIns(c.nIns ?? (c.type === 'COMB' ? 4 : 2)) : undefined,
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
+        edgeable: edgeableComp(c),
+        edge: c.edge,
       };
     }
     function emitSel() {
@@ -275,7 +281,7 @@
         const bub = gd.bubble?.(g.h);
         if (bub)
           inner += `<circle cx="${bub.cx}" cy="${bub.cy}" r="${bub.r}" class="body"/>`;
-        inner += caption(g.name, 30, gd.captionY ?? g.h + 21);
+        inner += caption(`${g.name}${edgeText(c)}`, 30, gd.captionY ?? g.h + 21);
       } else if (c.type === 'IN') {
         const on = !!c.on;
         inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
@@ -357,7 +363,8 @@
           <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(g.name)}</text>`;
         g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
         g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
-        if (c.label && c.label !== g.name) inner += caption(c.label, g.w / 2, g.h + 14);
+        if (c.label && c.label !== g.name) inner += caption(`${c.label}${edgeText(c)}`, g.w / 2, g.h + 14);
+        else if (c.edge) inner += caption(`${c.edge} edge`, g.w / 2, g.h + 14);
       }
 
       const core = stubs + inner + pins;
@@ -978,6 +985,13 @@
         const c = find(id);
         if (!c || c.type !== 'CLK') return;
         c.freq = clampFreq(hz);
+        refresh();
+      },
+      setEdge(id, edge) {
+        const c = find(id);
+        if (!c || !edgeableComp(c)) return;
+        if (edge) c.edge = edge; else delete c.edge;
+        if (selIds.has(id)) emitSel();
         refresh();
       },
       setWireBits(id, bits) {

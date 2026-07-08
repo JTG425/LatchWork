@@ -60,7 +60,8 @@ const cloneState = (s: SimState): SimState => JSON.parse(JSON.stringify(s));
 function keyOf(s: SimState): string {
   const vals = Object.keys(s.vals).sort().map(k => `${k}=${s.vals[k] | 0}`).join(',');
   const subs = Object.keys(s.sub).sort().map(k => `${k}{${keyOf(s.sub[k])}}`).join('');
-  return vals + '|' + subs;
+  const prev = Object.keys(s.prevIns ?? {}).sort().map(k => `${k}=[${s.prevIns[k].map(v => v | 0).join('')}]`).join(',');
+  return vals + '|' + prev + '|' + subs;
 }
 
 /* Evaluate with fixed inputs until the outputs and snapshot stop

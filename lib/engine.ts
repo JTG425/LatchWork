@@ -10,6 +10,7 @@ export type CompType =
   | 'IN' | 'BTN' | 'ONE' | 'CLK'
   | GateType
   | 'OUT' | 'SSEG' | 'COMB' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP';
+export type EdgeMode = 'rise' | 'fall';
 
 export interface Vec { x: number; y: number }
 
@@ -36,6 +37,8 @@ export interface Comp {
   nIns?: number;          // gates: input count (2–4)
   w?: number; h?: number; // chips: user-resized body, grid multiples
   freq?: number;          // CLK: full cycles per second
+  edge?: EdgeMode;         // gates/chips: update only on this clock edge
+  clockPin?: number;       // optional explicit clock input index
   _ins?: number[];
 }
 
@@ -157,8 +160,12 @@ export interface ChipDef {
   createdAt: number;
 }
 export type ChipLib = Record<string, ChipDef>;
-export interface SimState { vals: Record<string, number>; sub: Record<string, SimState> }
-export const newSimState = (): SimState => ({ vals: {}, sub: {} });
+export interface SimState {
+  vals: Record<string, number>;
+  sub: Record<string, SimState>;
+  prevIns: Record<string, number[]>;
+}
+export const newSimState = (): SimState => ({ vals: {}, sub: {}, prevIns: {} });
 
 export interface Pin { x: number; y: number; name?: string; bits?: number }
 export interface CompGeom { w: number; h: number; ins: Pin[]; outs: Pin[]; name: string; sub: string }
@@ -305,10 +312,41 @@ const orOverKeys = (state: SimState, keys?: string[]) => {
   return v;
 };
 
+const hasEdge = (c: Comp) => c.edge === 'rise' || c.edge === 'fall';
+export const edgeableComp = (c: Pick<Comp, 'type'>) => c.type === 'CHIP' || isGateType(c.type);
+
+function clockPinIndex(c: Comp, g: CompGeom): number {
+  if (!g.ins.length) return -1;
+  if (typeof c.clockPin === 'number' && c.clockPin >= 0 && c.clockPin < g.ins.length) {
+    return Math.round(c.clockPin);
+  }
+  const named = g.ins.findIndex(p => /^(clk|clock)$/i.test((p.name || '').trim()));
+  return named >= 0 ? named : g.ins.length - 1;
+}
+
+function heldOutputs(c: Comp, g: CompGeom, state: SimState): number[] {
+  return g.outs.map((_, i) => state.vals[c.id + ':' + i] | 0);
+}
+
+function edgeAllowsUpdate(c: Comp, g: CompGeom, ins: number[], state: SimState, fired: Set<string>): boolean | null {
+  if (!hasEdge(c)) return null;
+  const pin = clockPinIndex(c, g);
+  if (pin < 0) return null;
+  const prev = (state.prevIns ??= {})[c.id]?.[pin];
+  if (prev === undefined || fired.has(c.id)) return false;
+  const before = bit(prev);
+  const now = bit(ins[pin]);
+  const ok = c.edge === 'rise' ? before === 0 && now === 1 : before === 1 && now === 0;
+  if (ok) fired.add(c.id);
+  return ok;
+}
+
 function refreshInputSnapshots(comps: Comp[], state: SimState, lib: ChipLib, nets: NetInfo) {
+  state.prevIns ??= {};
   for (const c of comps) {
     const g = getGeom(c, lib);
     c._ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
+    state.prevIns[c.id] = c._ins.map(bit);
   }
 }
 
@@ -345,6 +383,7 @@ function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipL
 
   for (const a of comps) {
     if (a.type !== 'NAND' && a.type !== 'NOR') continue;
+    if (hasEdge(a)) continue;
     const ga = getGeom(a, lib);
 
     for (let ai = 0; ai < ga.ins.length; ai++) {
@@ -355,6 +394,7 @@ function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipL
       if (a.id >= bId) continue;
       const b = byId.get(bId);
       if (!b || b.type !== a.type) continue;
+      if (hasEdge(b)) continue;
 
       const gb = getGeom(b, lib);
       const bi = gb.ins.findIndex((_, i) => readsFrom(b.id, i, outKey(a.id)));
@@ -417,6 +457,7 @@ export function evaluateNet(
   if (depth > 12) return;
 
   const nets = analyzeNets(wires, tunnelPinGroups(comps));
+  state.prevIns ??= {};
 
   /*
      Important simulator fix:
@@ -431,6 +472,7 @@ export function evaluateNet(
      immediate ripple-through behavior.
   */
   const passes = Math.min(48, Math.max(8, comps.length * 2 + 4));
+  const edgeFired = new Set<string>();
 
   for (let k = 0; k < passes; k++) {
     const nextVals: Record<string, number> = {};
@@ -441,8 +483,11 @@ export function evaluateNet(
       c._ins = ins;
 
       let outs: number[];
+      const edgeUpdate = edgeAllowsUpdate(c, g, ins, state, edgeFired);
 
-      if (c.type === 'CHIP') {
+      if (edgeUpdate === false) {
+        outs = heldOutputs(c, g, state);
+      } else if (c.type === 'CHIP') {
         const def = c.chipId ? lib[c.chipId] : undefined;
         outs = def
           ? evalChip(def, (state.sub[c.id] ??= newSimState()), ins, lib, depth + 1, now)

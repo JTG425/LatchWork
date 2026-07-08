@@ -16,6 +16,7 @@ import { GATE_DEFS, isGateType } from './gates';
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const snap = (v: number) => Math.round(v / GRID) * GRID;
+const edgeText = (c: Pick<Comp, 'edge'>) => c.edge === 'rise' ? ' / rise' : c.edge === 'fall' ? ' / fall' : '';
 
 /* Rotation helpers — same mapping as the editor (components/editor.ts). */
 function rotPt(px: number, py: number, rot: number, w: number, h: number): Vec {
@@ -71,7 +72,7 @@ function compMarkup(c: Comp, lib: ChipLib): string {
     if (curve) inner += `<path d="${curve}" fill="none" stroke="var(--body-stroke)" stroke-width="1.5"/>`;
     const bub = gd.bubble?.(g.h);
     if (bub) inner += `<circle cx="${bub.cx}" cy="${bub.cy}" r="${bub.r}" class="body"/>`;
-    inner += caption(g.name, 30, gd.captionY ?? g.h + 21);
+    inner += caption(`${g.name}${edgeText(c)}`, 30, gd.captionY ?? g.h + 21);
   } else if (c.type === 'IN') {
     inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
       <rect x="11" y="11" width="38" height="18" rx="9" fill="#3a3a44"/>
@@ -122,6 +123,7 @@ function compMarkup(c: Comp, lib: ChipLib): string {
       <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(g.name)}</text>`;
     g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
     g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
+    if (c.edge) inner += caption(`${c.edge} edge`, g.w / 2, g.h + 14);
   }
 
   const core = stubs + inner + pins;

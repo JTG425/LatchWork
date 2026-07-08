@@ -464,6 +464,24 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           </div>
         )}
 
+        {sel?.kind === 'comp' && sel.edgeable && (
+          <div id="edgegrp" title="Edge trigger — chips use a CLK/CLOCK pin when present, otherwise the last input">
+            <span>edge</span>
+            {[
+              { label: 'level', value: null },
+              { label: 'rise', value: 'rise' as const },
+              { label: 'fall', value: 'fall' as const },
+            ].map(opt => (
+              <button
+                key={opt.label}
+                className={(sel.edge ?? null) === opt.value ? 'on' : ''}
+                aria-pressed={(sel.edge ?? null) === opt.value}
+                onClick={() => api().setEdge(sel.id, opt.value)}
+              >{opt.label}</button>
+            ))}
+          </div>
+        )}
+
         {sel?.kind === 'comp' && sel.type === 'CLK' && (
           <div id="freqgrp" title="Clock frequency">
             <input
