@@ -594,6 +594,7 @@
         a: shiftEnd(w.a),
         b: shiftEnd(w.b),
         ...(w.via ? { via: w.via.map(v => ({ x: v.x + dx, y: v.y + dy })) } : {}),
+        ...(w.bits ? { bits: w.bits } : {}),
       }));
       comps.push(...newComps);
       wires.push(...newWires);

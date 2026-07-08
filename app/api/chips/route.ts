@@ -15,6 +15,8 @@ function chipsPathForUser(userId: string) {
   return `users/${encodeURIComponent(userId)}/chips.json`;
 }
 
+const blobToken = () => process.env.LATCH_BLOB_READ_WRITE_TOKEN;
+
 async function getAuth0UserId() {
   if (!authConfigured) return null;
   const session = await auth0.getSession();
@@ -32,12 +34,13 @@ export async function GET() {
     return NextResponse.json([], { status: 401 });
   }
 
-  if (!process.env.LATCH_BLOB_READ_WRITE_TOKEN) {
+  const token = blobToken();
+  if (!token) {
     return NextResponse.json([]);
   }
 
   const pathname = chipsPathForUser(userId);
-  const { blobs } = await list({ prefix: pathname, token: process.env.LATCH_BLOB_READ_WRITE_TOKEN });
+  const { blobs } = await list({ prefix: pathname, token });
   const existing = blobs.find(blob => blob.pathname === pathname);
 
   if (!existing) {
@@ -62,7 +65,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Sign in to sync chips.' }, { status: 401 });
   }
 
-  if (!process.env.LATCH_BLOB_READ_WRITE_TOKEN) {
+  const token = blobToken();
+  if (!token) {
     return NextResponse.json({ error: 'Blob storage is not configured.' }, { status: 503 });
   }
 
@@ -82,7 +86,7 @@ export async function POST(request: Request) {
     access: 'public',
     contentType: 'application/json',
     allowOverwrite: true,
-    token: process.env.LATCH_BLOB_READ_WRITE_TOKEN,
+    token,
   });
 
   return NextResponse.json({ ok: true });

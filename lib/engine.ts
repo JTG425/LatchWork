@@ -305,6 +305,106 @@ const orOverKeys = (state: SimState, keys?: string[]) => {
   return v;
 };
 
+function refreshInputSnapshots(comps: Comp[], state: SimState, lib: ChipLib, nets: NetInfo) {
+  for (const c of comps) {
+    const g = getGeom(c, lib);
+    c._ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
+  }
+}
+
+/*
+   Cross-coupled NAND/NOR pairs are the primitive memory cell behind SR
+   latches and JK flip-flops. Pure simultaneous delta passes can bounce an
+   all-zero power-on latch between two invalid states forever; old immediate
+   ripple evaluation "fixed" that only by depending on component order.
+
+   This stabilizer recognizes the explicit two-gate latch topology and
+   applies the latch's stable equations after each delta pass. Set/reset
+   inputs win; hold keeps an existing complementary state, and an invalid
+   power-on hold gets one deterministic complementary state.
+*/
+function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipLib, nets: NetInfo): boolean {
+  const byId = new Map(comps.map(c => [c.id, c]));
+  let changed = false;
+
+  const outKey = (id: string) => `${id}:0`;
+  const inputKeys = (id: string, pin: number) => nets.inputDrivers.get(`${id}:${pin}`) ?? [];
+  const readsFrom = (id: string, pin: number, driver: string) => inputKeys(id, pin).includes(driver);
+  const inputValExcept = (id: string, pin: number, excludedDriver?: string) => {
+    const keys = inputKeys(id, pin).filter(k => k !== excludedDriver);
+    return bit(orOverKeys(state, keys));
+  };
+  const setVal = (id: string, v: number) => {
+    const k = outKey(id);
+    const n = bit(v);
+    if ((state.vals[k] | 0) !== n) {
+      state.vals[k] = n;
+      changed = true;
+    }
+  };
+
+  for (const a of comps) {
+    if (a.type !== 'NAND' && a.type !== 'NOR') continue;
+    const ga = getGeom(a, lib);
+
+    for (let ai = 0; ai < ga.ins.length; ai++) {
+      const driver = inputKeys(a.id, ai).find(k => k.endsWith(':0') && byId.get(k.slice(0, -2))?.type === a.type);
+      if (!driver) continue;
+
+      const bId = driver.slice(0, -2);
+      if (a.id >= bId) continue;
+      const b = byId.get(bId);
+      if (!b || b.type !== a.type) continue;
+
+      const gb = getGeom(b, lib);
+      const bi = gb.ins.findIndex((_, i) => readsFrom(b.id, i, outKey(a.id)));
+      if (bi < 0) continue;
+
+      const aExternal = ga.ins.map((_, i) => inputValExcept(a.id, i, i === ai ? outKey(b.id) : undefined));
+      const bExternal = gb.ins.map((_, i) => inputValExcept(b.id, i, i === bi ? outKey(a.id) : undefined));
+
+      let nextA: number;
+      let nextB: number;
+
+      if (a.type === 'NAND') {
+        const aForcedHigh = aExternal.some((v, i) => i !== ai && !v);
+        const bForcedHigh = bExternal.some((v, i) => i !== bi && !v);
+        if (aForcedHigh && bForcedHigh) {
+          nextA = 1; nextB = 1;
+        } else if (aForcedHigh) {
+          nextA = 1; nextB = 0;
+        } else if (bForcedHigh) {
+          nextA = 0; nextB = 1;
+        } else {
+          const av = bit(state.vals[outKey(a.id)]);
+          const bv = bit(state.vals[outKey(b.id)]);
+          [nextA, nextB] = av !== bv ? [av, bv] : [0, 1];
+        }
+      } else {
+        const aForcedLow = aExternal.some((v, i) => i !== ai && !!v);
+        const bForcedLow = bExternal.some((v, i) => i !== bi && !!v);
+        if (aForcedLow && bForcedLow) {
+          nextA = 0; nextB = 0;
+        } else if (aForcedLow) {
+          nextA = 0; nextB = 1;
+        } else if (bForcedLow) {
+          nextA = 1; nextB = 0;
+        } else {
+          const av = bit(state.vals[outKey(a.id)]);
+          const bv = bit(state.vals[outKey(b.id)]);
+          [nextA, nextB] = av !== bv ? [av, bv] : [0, 1];
+        }
+      }
+
+      setVal(a.id, nextA);
+      setVal(b.id, nextB);
+      break;
+    }
+  }
+
+  return changed;
+}
+
 export function evaluateNet(
   comps: Comp[],
   wires: Wire[],
@@ -367,9 +467,13 @@ export function evaluateNet(
       }
     }
 
+    if (stabilizeCrossCoupledLatches(comps, state, lib, nets)) changed = true;
+
     // Once a pass produces no output changes, the circuit has settled.
     if (!changed) break;
   }
+
+  refreshInputSnapshots(comps, state, lib, nets);
 }
 
 export function evalChip(

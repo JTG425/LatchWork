@@ -1,5 +1,5 @@
 import Simulator, { SimUser } from '@/components/Simulator';
-import { auth0, authConfigured } from '@/auth';
+import { auth0, authConfigured, authEnv } from '@/auth';
 import type { AuthPublicConfig } from '@/lib/auth-embedded';
 
 export default async function Home() {
@@ -9,9 +9,9 @@ export default async function Home() {
      is public by design — it appears in every /authorize URL). */
   const auth: AuthPublicConfig | null = authConfigured
     ? {
-        domain: process.env.AUTH0_DOMAIN!,
-        clientId: process.env.AUTH0_CLIENT_ID!,
-        realm: process.env.AUTH0_CONNECTION || 'Username-Password-Authentication',
+        domain: authEnv.domain!,
+        clientId: authEnv.clientId!,
+        realm: authEnv.connection,
       }
     : null;
 

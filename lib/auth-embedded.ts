@@ -75,7 +75,7 @@ export async function embeddedSignIn(cfg: AuthPublicConfig, email: string, passw
     if (code === 'unauthorized_client')
       throw new AuthUiError('Embedded sign-in isn’t enabled for this Auth0 application — turn on “Allow Cross-Origin Authentication” in its settings, or use the hosted sign-in link below.', 'not_enabled');
     if (code === 'invalid_request' && desc?.toLowerCase().includes('realm'))
-      throw new AuthUiError('The sign-in service is misconfigured (unknown connection) — check AUTH_AUTH0_CONNECTION.', 'bad_realm');
+      throw new AuthUiError('The sign-in service is misconfigured (unknown connection) — check AUTH0_CONNECTION.', 'bad_realm');
     throw new AuthUiError(desc || 'Sign-in failed — please try again.');
   }
 

@@ -506,7 +506,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a>
           : auth
             ? <button className="tbtn ghostbtn" onClick={() => setAuthOpen(true)}>Sign in</button>
-            : <a className="tbtn ghostbtn" href="/auth/login">Sign in</a>}
+            : null}
       </div>
 
       <div id="main">
@@ -638,7 +638,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         <span><kbd>W</kbd> wire tool: start at any dot, split wires · click a dot twice to end in air</span>
         <span><kbd>R</kbd> rotate · drag empty space to <b>select</b> · <kbd>⌘/⌃</kbd><kbd>C</kbd>/<kbd>V</kbd> copy &amp; paste</span>
         <span><kbd>⌫</kbd> delete · <kbd>esc</kbd> cancel · scroll to pan · <kbd>ctrl</kbd>+scroll to zoom · <kbd>space</kbd>+drag or middle-drag to pan</span>
-        <span>{user ? 'Chips sync to your account' : 'Chips save to this browser — sign in to sync'}</span>
+        <span>{user ? 'Chips sync to your account' : auth ? 'Chips save to this browser — sign in to sync' : 'Chips save to this browser'}</span>
       </div>
 
       {authOpen && auth && <AuthDialog auth={auth} onClose={() => setAuthOpen(false)} />}
@@ -648,7 +648,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           user={user}
           chips={chips}
           onAdd={addCommunityChips}
-          onSignIn={() => setAuthOpen(true)}
+          onSignIn={() => auth ? setAuthOpen(true) : notify('Sign-in is not configured for this deployment.')}
           onClose={() => setCommunityOpen(false)}
           notify={notify}
         />

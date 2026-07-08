@@ -40,19 +40,19 @@ npm run dev
 ## Required environment variables
 
 ```bash
-AUTH_AUTH0_CLIENT_ID=
-AUTH_AUTH0_CLIENT_SECRET=
-AUTH_AUTH0_DOMAIN=
-AUTH_AUTH0_SECRET=
-BLOB_READ_WRITE_TOKEN=
-BLOB_STORE_ID=
-BLOB_WEBHOOK_PUBLIC_KEY=
 VERCEL_OIDC_TOKEN=
+LATCH_BLOB_STORE_ID=
+LATCH_BLOB_READ_WRITE_TOKEN=
+APP_BASE_URL=https://www.latchwork.io
+AUTH0_DOMAIN=
+AUTH0_CLIENT_ID=
+AUTH0_CLIENT_SECRET=
+AUTH0_SECRET=
 ```
 
-`BLOB_STORE_ID`, `BLOB_WEBHOOK_PUBLIC_KEY`, and `VERCEL_OIDC_TOKEN` are included because Vercel may create them, but this app only needs `BLOB_READ_WRITE_TOKEN` at runtime for chip sync.
+`LATCH_BLOB_STORE_ID` and `VERCEL_OIDC_TOKEN` are included because Vercel may create them, but this app only needs `LATCH_BLOB_READ_WRITE_TOKEN` at runtime for chip sync and community chips.
 
-Optional: `AUTH_AUTH0_CONNECTION` — the Auth0 database connection used by the embedded sign-in dialog. Defaults to `Username-Password-Authentication`.
+Optional: `AUTH0_CONNECTION` — the Auth0 database connection used by the embedded sign-in dialog. Defaults to `Username-Password-Authentication`.
 
 ## Embedded sign-in dialog
 
@@ -89,10 +89,3 @@ http://localhost:3000
 ```
 
 For production, add your deployed Vercel URL equivalents.
-# LatchWork
-# LatchWork
-# LatchWork
-# LatchWork
-# LatchWork
-# LatchWork
-# LatchWork
