@@ -14,9 +14,10 @@ This zip is configured to use Auth0 only. NextAuth and GitHub OAuth have been re
 - **7-segment display** — a one-digit display under *Output* with 8 pins (segments `a`–`g` + `dp`), each driven directly by a 1-bit signal.
 - **Buses** — select any wire to set how many bits it carries (1/2/4/8) from the titlebar; multi-bit wires draw thicker and show a live binary readout. Wires started from a bus pin pick up its width automatically.
 - **Bit combiner** — packs 2–4 individual bits (MSB on top) into one value on a 4-bit output bus; unused high bits pad with zeros (e.g. inputs `1,1` → `0011`).
+- **Memory circuits** — the *Memory* palette folder includes JK Latch, SR Latch, D Latch, D Flip-Flop, SR Flip-Flop, and T Flip-Flop primitives. The JK/T parts default to falling-edge operation so `Q → CLK` ripple counters count cleanly.
 - **Tunnels** — name a tunnel node and it joins the net of every other tunnel with the same name, like an invisible wire. Tunnels are pure junctions: they can sit on either side of a connection.
 - **Palette folders** — the side menu is organized into collapsible groups and can be resized by dragging its right edge; both persist per browser.
-- **Edge triggering** — select a primitive gate or placed custom chip to choose level-sensitive, rising-edge, or falling-edge updates. Custom chips use a pin named `CLK`/`CLOCK` as the trigger when present, otherwise their last input pin.
+- **Edge triggering** — select a primitive gate, clocked memory circuit, or placed custom chip to choose level-sensitive, rising-edge, or falling-edge updates. Custom chips use a pin named `CLK`/`CLOCK` as the trigger when present, otherwise their last input pin.
 
 - **Editor tabs** — the bottom bar works like a spreadsheet's sheet tabs: `+` opens a blank canvas, double-click renames, `×` closes. All tabs (and which one was active) persist to `localStorage` (`latchwork.tabs.v1`; old single-board saves migrate automatically).
 - **Chip inspector** — the `i` button on any saved chip (palette → My chips) opens an auto-generated report: the abstracted chip drawing with a toggle to view its internals, a simulated **truth table**, and for stateful chips a minimized **state machine diagram** (see `lib/analyze.ts`). The same report is shown for community chips.

@@ -8,6 +8,7 @@ export const GRID = 20;
    TUN  = tunnel (named wireless net link). */
 export type CompType =
   | 'IN' | 'BTN' | 'ONE' | 'CLK'
+  | 'SRLATCH' | 'DLATCH' | 'JKFF' | 'DFF' | 'SRFF' | 'TFF'
   | GateType
   | 'OUT' | 'SSEG' | 'COMB' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP';
 export type EdgeMode = 'rise' | 'fall';
@@ -181,6 +182,36 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
   BTN: { name: 'Button', sub: 'momentary 1', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
   ONE: { name: 'Constant 1', sub: 'always high', w: 40, h: 40, ins: [], outs: [{ x: 60, y: 20 }] },
   CLK: { name: 'Clock', sub: 'square wave', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
+  SRLATCH: {
+    name: 'SR Latch', sub: 'set/reset memory', w: 80, h: 60,
+    ins: [{ x: -20, y: 20, name: 'S' }, { x: -20, y: 40, name: 'R' }],
+    outs: [{ x: 100, y: 20, name: 'Q' }, { x: 100, y: 40, name: 'Q̄' }],
+  },
+  DLATCH: {
+    name: 'D Latch', sub: 'level D memory', w: 80, h: 60,
+    ins: [{ x: -20, y: 20, name: 'D' }, { x: -20, y: 40, name: 'EN' }],
+    outs: [{ x: 100, y: 20, name: 'Q' }, { x: 100, y: 40, name: 'Q̄' }],
+  },
+  JKFF: {
+    name: 'JK Latch', sub: 'fall-edge J/K', w: 90, h: 80,
+    ins: [{ x: -20, y: 20, name: 'J' }, { x: -20, y: 40, name: 'CLK' }, { x: -20, y: 60, name: 'K' }],
+    outs: [{ x: 110, y: 20, name: 'Q' }, { x: 110, y: 60, name: 'Q̄' }],
+  },
+  DFF: {
+    name: 'D Flip-Flop', sub: 'edge D memory', w: 90, h: 60,
+    ins: [{ x: -20, y: 20, name: 'D' }, { x: -20, y: 40, name: 'CLK' }],
+    outs: [{ x: 110, y: 20, name: 'Q' }, { x: 110, y: 40, name: 'Q̄' }],
+  },
+  SRFF: {
+    name: 'SR Flip-Flop', sub: 'edge set/reset', w: 90, h: 80,
+    ins: [{ x: -20, y: 20, name: 'S' }, { x: -20, y: 40, name: 'CLK' }, { x: -20, y: 60, name: 'R' }],
+    outs: [{ x: 110, y: 20, name: 'Q' }, { x: 110, y: 60, name: 'Q̄' }],
+  },
+  TFF: {
+    name: 'T Flip-Flop', sub: 'edge toggle', w: 90, h: 60,
+    ins: [{ x: -20, y: 20, name: 'T' }, { x: -20, y: 40, name: 'CLK' }],
+    outs: [{ x: 110, y: 20, name: 'Q' }, { x: 110, y: 40, name: 'Q̄' }],
+  },
   OUT: { name: 'LED', sub: 'output', w: 40, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
   SSEG: {
     name: '7-Segment', sub: 'digit display', w: 100, h: 160,
@@ -201,6 +232,7 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
 export const PALETTE_ORDER: [string, CompType[]][] = [
   ['Input', ['IN', 'BTN', 'ONE', 'CLK']],
   ['Gates', [...GATE_TYPES]],
+  ['Memory', ['JKFF', 'SRLATCH', 'DLATCH', 'DFF', 'SRFF', 'TFF']],
   ['Output', ['OUT', 'SSEG']],
   ['Bus & routing', ['COMB', 'TUN']],
   ['Chip pins', ['IPIN', 'OPIN']],
@@ -269,14 +301,92 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'w' | 'h'>, l
 
 const bit = (v: number | undefined) => (v ? 1 : 0);
 const intVal = (v: number | undefined) => (Number.isFinite(v) ? (v! | 0) : 0);
+const MEMORY_TYPES: ReadonlySet<CompType> = new Set(['SRLATCH', 'DLATCH', 'JKFF', 'DFF', 'SRFF', 'TFF']);
+const EDGE_MEMORY_TYPES: ReadonlySet<CompType> = new Set(['JKFF', 'DFF', 'SRFF', 'TFF']);
+export const isMemoryType = (type: CompType) => MEMORY_TYPES.has(type);
+export const defaultEdgeForComp = (c: Pick<Comp, 'type' | 'edge'>): EdgeMode | undefined => {
+  if (c.edge === 'rise' || c.edge === 'fall') return c.edge;
+  if (c.type === 'JKFF' || c.type === 'TFF') return 'fall';
+  if (c.type === 'DFF' || c.type === 'SRFF') return 'rise';
+  return undefined;
+};
 
-function evalPrim(c: Comp, ins: number[], now: number): number[] {
+const defaultMemoryEdge = (c: Comp): EdgeMode => defaultEdgeForComp(c) ?? 'rise';
+
+function memoryTriggered(c: Comp, g: CompGeom, ins: number[], state: SimState, fired: Set<string>): boolean {
+  const pin = clockPinIndex(c, g);
+  if (pin < 0) return false;
+  const prev = (state.prevIns ??= {})[c.id]?.[pin];
+  if (prev === undefined || fired.has(c.id)) return false;
+  const before = bit(prev);
+  const now = bit(ins[pin]);
+  const mode = defaultMemoryEdge(c);
+  const ok = mode === 'rise' ? before === 0 && now === 1 : before === 1 && now === 0;
+  if (ok) fired.add(c.id);
+  return ok;
+}
+
+function memoryOut(q: number, invalid = false): number[] {
+  const v = bit(q);
+  return invalid ? [0, 0] : [v, v ? 0 : 1];
+}
+
+function evalMemory(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFired: Set<string>): number[] {
+  let q = bit(state.vals[c.id + ':0']);
+
+  switch (c.type) {
+    case 'SRLATCH': {
+      const s = bit(ins[0]), r = bit(ins[1]);
+      if (s && r) return memoryOut(q, true);
+      if (s) q = 1;
+      else if (r) q = 0;
+      return memoryOut(q);
+    }
+
+    case 'DLATCH':
+      if (bit(ins[1])) q = bit(ins[0]);
+      return memoryOut(q);
+
+    case 'JKFF':
+      if (memoryTriggered(c, g, ins, state, edgeFired)) {
+        const j = bit(ins[0]), k = bit(ins[2]);
+        if (j && k) q = q ? 0 : 1;
+        else if (j) q = 1;
+        else if (k) q = 0;
+      }
+      return memoryOut(q);
+
+    case 'DFF':
+      if (memoryTriggered(c, g, ins, state, edgeFired)) q = bit(ins[0]);
+      return memoryOut(q);
+
+    case 'SRFF':
+      if (memoryTriggered(c, g, ins, state, edgeFired)) {
+        const s = bit(ins[0]), r = bit(ins[2]);
+        if (s && r) return memoryOut(q, true);
+        if (s) q = 1;
+        else if (r) q = 0;
+      }
+      return memoryOut(q);
+
+    case 'TFF':
+      if (memoryTriggered(c, g, ins, state, edgeFired) && bit(ins[0])) q = q ? 0 : 1;
+      return memoryOut(q);
+
+    default:
+      return [];
+  }
+}
+
+function evalPrim(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFired: Set<string>, now: number): number[] {
   if (isGateType(c.type)) {
     // Primitive gates are 1-bit logic devices.
     // This prevents bus values from accidentally becoming multi-bit gate outputs.
     const gateIns = ins.map(bit);
     return [bit(GATE_DEFS[c.type].eval(gateIns))];
   }
+
+  if (isMemoryType(c.type)) return evalMemory(c, g, ins, state, edgeFired);
 
   switch (c.type) {
     case 'IN':
@@ -313,7 +423,8 @@ const orOverKeys = (state: SimState, keys?: string[]) => {
 };
 
 const hasEdge = (c: Comp) => c.edge === 'rise' || c.edge === 'fall';
-export const edgeableComp = (c: Pick<Comp, 'type'>) => c.type === 'CHIP' || isGateType(c.type);
+export const edgeableComp = (c: Pick<Comp, 'type'>) =>
+  c.type === 'CHIP' || isGateType(c.type) || EDGE_MEMORY_TYPES.has(c.type);
 
 function clockPinIndex(c: Comp, g: CompGeom): number {
   if (!g.ins.length) return -1;
@@ -483,7 +594,7 @@ export function evaluateNet(
       c._ins = ins;
 
       let outs: number[];
-      const edgeUpdate = edgeAllowsUpdate(c, g, ins, state, edgeFired);
+      const edgeUpdate = isMemoryType(c.type) ? null : edgeAllowsUpdate(c, g, ins, state, edgeFired);
 
       if (edgeUpdate === false) {
         outs = heldOutputs(c, g, state);
@@ -495,7 +606,7 @@ export function evaluateNet(
       } else if ((c.type === 'IN' || c.type === 'BTN' || c.type === 'IPIN') && boundIns?.has(c.id)) {
         outs = [bit(boundIns.get(c.id))];
       } else {
-        outs = evalPrim(c, ins, now);
+        outs = evalPrim(c, g, ins, state, edgeFired, now);
       }
 
       for (let i = 0; i < g.outs.length; i++) {

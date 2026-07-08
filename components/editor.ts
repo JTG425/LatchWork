@@ -10,7 +10,7 @@
     SimState, newSimState, getGeom, evaluateNet, analyzeNets,
     normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
     MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, CHIP_MIN_W, chipMinH,
-    SEG_NAMES, edgeableComp,
+    SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType,
   } from '@/lib/engine';
   import { GATE_DEFS, isGateType } from '@/lib/gates';
 
@@ -173,7 +173,7 @@
           ? clampGateIns(c.nIns ?? (c.type === 'COMB' ? 4 : 2)) : undefined,
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
         edgeable: edgeableComp(c),
-        edge: c.edge,
+        edge: defaultEdgeForComp(c),
       };
     }
     function emitSel() {
@@ -357,6 +357,16 @@
           inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>2${sup(n - 1 - i)}</text>`;
         });
         inner += caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
+      } else if (isMemoryType(c.type)) {
+        const edge = defaultEdgeForComp(c);
+        const q = sim.vals[c.id + ':0'] | 0;
+        const edgeLabel = edge ? `${edge} edge` : '';
+        inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+          <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(c.label || g.name)}</text>
+          <text class="combval ${q ? 'hi' : ''}" x="${g.w / 2}" y="${g.h / 2 + 24}"${ctr(g.w / 2, g.h / 2 + 24)}>Q=${q}</text>`;
+        g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
+        g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
+        if (edgeLabel) inner += caption(edgeLabel, g.w / 2, g.h + 14);
       } else if (c.type === 'CHIP') {
         inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
           <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
@@ -531,6 +541,8 @@
       if (placing.type === 'IN' || placing.type === 'IPIN') c.on = false;
       if (placing.type === 'CLK') c.freq = 1;
       if (placing.type === 'COMB') c.nIns = 4;
+      const edge = defaultEdgeForComp(c);
+      if (edge) c.edge = edge;
       comps.push(c);
       setSelection([c.id]);
       refresh();

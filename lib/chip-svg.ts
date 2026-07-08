@@ -9,7 +9,7 @@
 
 import {
   Comp, Wire, WireEnd, Vec, ChipDef, ChipLib, GRID,
-  getGeom, chipGeom, isPinEnd, isAttachEnd,
+  getGeom, chipGeom, isPinEnd, isAttachEnd, isMemoryType, defaultEdgeForComp,
 } from './engine';
 import { GATE_DEFS, isGateType } from './gates';
 
@@ -117,6 +117,14 @@ function compMarkup(c: Comp, lib: ChipLib): string {
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
       <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>0000</text>` +
       caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
+  } else if (isMemoryType(c.type)) {
+    const edge = defaultEdgeForComp(c);
+    inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+      <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(c.label || g.name)}</text>
+      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 24}"${ctr(g.w / 2, g.h / 2 + 24)}>Q=0</text>`;
+    g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
+    g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
+    if (edge) inner += caption(`${edge} edge`, g.w / 2, g.h + 14);
   } else if (c.type === 'CHIP') {
     inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
       <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>

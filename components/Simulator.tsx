@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Board, ChipDef, ChipLib, CompType, PALETTE_ORDER, getGeom,
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
+  isMemoryType,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
@@ -87,6 +88,16 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     case 'IPIN': body = <><rect x="0" y="0" width="40" height="40" rx="7" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'OPIN': body = <><circle cx="20" cy="20" r="19" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'CHIP': body = <><rect x="0" y="0" width={g.w} height={g.h} rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="12" cy="10" r="2.5" fill="var(--muted)" /></>; break;
+  }
+  if (isMemoryType(type)) {
+    body = (
+      <>
+        <rect x="0" y="0" width={g.w} height={g.h} rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" />
+        <text x={g.w / 2} y={g.h / 2 + 5} textAnchor="middle" fill="var(--text)" fontSize="18" fontWeight="700" fontFamily="ui-monospace,Menlo,monospace">Q</text>
+        {g.ins.map((p, i) => <text key={`i${i}`} x="7" y={p.y + 3} fill="var(--muted)" fontSize="9" fontFamily="ui-monospace,Menlo,monospace">{p.name}</text>)}
+        {g.outs.map((p, i) => <text key={`o${i}`} x={g.w - 7} y={p.y + 3} textAnchor="end" fill="var(--muted)" fontSize="9" fontFamily="ui-monospace,Menlo,monospace">{p.name}</text>)}
+      </>
+    );
   }
   const yMin = isGate ? -10 : -2;
   const w = g.w + 8, h = Math.max(g.h, 40) + (isGate ? 22 : 4);
@@ -468,7 +479,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           <div id="edgegrp" title="Edge trigger — chips use a CLK/CLOCK pin when present, otherwise the last input">
             <span>edge</span>
             {[
-              { label: 'level', value: null },
+              ...(isMemoryType(sel.type!) ? [] : [{ label: 'level', value: null }]),
               { label: 'rise', value: 'rise' as const },
               { label: 'fall', value: 'fall' as const },
             ].map(opt => (
