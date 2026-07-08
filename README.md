@@ -12,8 +12,8 @@ This zip is configured to use Auth0 only. NextAuth and GitHub OAuth have been re
 ## Workbench features
 
 - **7-segment display** — a one-digit display under *Output* with 8 pins (segments `a`–`g` + `dp`), each driven directly by a 1-bit signal.
-- **Buses** — select any wire to set how many bits it carries (1/2/4/8) from the titlebar; multi-bit wires draw thicker and show a live binary readout. Wires started from a bus pin pick up its width automatically.
-- **Bit combiner** — packs 2–4 individual bits (MSB on top) into one value on a 4-bit output bus; unused high bits pad with zeros (e.g. inputs `1,1` → `0011`).
+- **Buses** — select any wire to set how many bits it carries from the titlebar number input; multi-bit wires draw thicker and show a live binary readout. Wires started from a bus pin pick up its width automatically.
+- **Bit combiner and splitter** — the combiner packs N individual bits (MSB on top) into an N-bit bus, and the splitter expands an N-bit bus back into individual weighted bits.
 - **Memory circuits** — the *Memory* palette folder includes JK Latch, SR Latch, D Latch, D Flip-Flop, SR Flip-Flop, and T Flip-Flop primitives. The JK/T parts default to falling-edge operation so `Q → CLK` ripple counters count cleanly.
 - **Tunnels** — name a tunnel node and it joins the net of every other tunnel with the same name, like an invisible wire. Tunnels are pure junctions: they can sit on either side of a connection.
 - **Palette folders** — the side menu is organized into collapsible groups and can be resized by dragging its right edge; both persist per browser.

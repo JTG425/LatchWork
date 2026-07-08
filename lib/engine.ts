@@ -4,13 +4,14 @@ export const GRID = 20;
 
 /* Gate types come from the lib/gates registry — one file per gate.
    SSEG = one-digit 7-segment display (8 segment inputs, a–g + dp),
-   COMB = bit combiner (up to 4 bits → one bus value, MSB first),
+   COMB = bit combiner (N individual bits → one N-bit bus, MSB first),
+   SPLIT = bus splitter (one N-bit bus → N individual bits, MSB first),
    TUN  = tunnel (named wireless net link). */
 export type CompType =
   | 'IN' | 'BTN' | 'ONE' | 'CLK'
   | 'SRLATCH' | 'DLATCH' | 'JKFF' | 'DFF' | 'SRFF' | 'TFF'
   | GateType
-  | 'OUT' | 'SSEG' | 'COMB' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP';
+  | 'OUT' | 'SSEG' | 'COMB' | 'SPLIT' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP';
 export type EdgeMode = 'rise' | 'fall';
 
 export interface Vec { x: number; y: number }
@@ -28,14 +29,17 @@ export const isAttachEnd = (e: WireEnd): e is AttachEnd => (e as AttachEnd).wire
    so a net carries a whole bus value; `bits` sets how it's masked and
    displayed. */
 export interface Wire { id: string; a: WireEnd; b: WireEnd; via?: Vec[]; bits?: number }
-export const MAX_WIRE_BITS = 8;
-export const clampBits = (n?: number) => Math.min(MAX_WIRE_BITS, Math.max(1, Math.round(n ?? 1)));
+export const MAX_WIRE_BITS = 16;
+export const clampBits = (n?: number) => {
+  const v = Number.isFinite(n) ? n! : 1;
+  return Math.min(MAX_WIRE_BITS, Math.max(1, Math.round(v)));
+};
 
 export interface Comp {
   id: string; type: CompType; x: number; y: number;
   on?: boolean; pressed?: boolean; label?: string; chipId?: string;
   rot?: number;           // 0 right (default), 1 down, 2 left, 3 up
-  nIns?: number;          // gates: input count (2–4)
+  nIns?: number;          // gates: input count (2-4); bus tools: bit count (1-16)
   w?: number; h?: number; // chips: user-resized body, grid multiples
   freq?: number;          // CLK: full cycles per second
   edge?: EdgeMode;         // gates/chips: update only on this clock edge
@@ -220,9 +224,14 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
     outs: [],
   },
   COMB: {
-    name: 'Bit combiner', sub: 'bits → bus', w: 60, h: 60,
+    name: 'Bit combiner', sub: 'N bits → bus', w: 60, h: 60,
     ins: Array.from({ length: 4 }, (_, i) => ({ x: -20, y: i * GRID })),
     outs: [{ x: 80, y: 30, bits: 4 }],
+  },
+  SPLIT: {
+    name: 'Splitter', sub: 'bus → N bits', w: 80, h: 60,
+    ins: [{ x: -20, y: 30, bits: 4, name: 'BUS' }],
+    outs: Array.from({ length: 4 }, (_, i) => ({ x: 100, y: i * GRID })),
   },
   TUN: { name: 'Tunnel', sub: 'named link', w: 80, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
   IPIN: { name: 'Input pin', sub: 'chip input', w: 40, h: 40, ins: [], outs: [{ x: 60, y: 20 }] },
@@ -234,14 +243,18 @@ export const PALETTE_ORDER: [string, CompType[]][] = [
   ['Gates', [...GATE_TYPES]],
   ['Memory', ['JKFF', 'SRLATCH', 'DLATCH', 'DFF', 'SRFF', 'TFF']],
   ['Output', ['OUT', 'SSEG']],
-  ['Bus & routing', ['COMB', 'TUN']],
+  ['Bus & routing', ['COMB', 'SPLIT', 'TUN']],
   ['Chip pins', ['IPIN', 'OPIN']],
 ];
 
 /* Gates whose input count can be edited (NOT is always 1-in) */
 export const MULTI_IN_GATES: ReadonlySet<CompType> = new Set(GATE_TYPES.filter(t => GATE_DEFS[t].multiIn));
 export const MAX_GATE_INS = 4;
-export const clampGateIns = (n?: number) => Math.min(MAX_GATE_INS, Math.max(2, Math.round(n ?? 2)));
+export const clampGateIns = (n?: number) => {
+  const v = Number.isFinite(n) ? n! : 2;
+  return Math.min(MAX_GATE_INS, Math.max(2, Math.round(v)));
+};
+export const isBusToolType = (type: CompType) => type === 'COMB' || type === 'SPLIT';
 
 export const CHIP_MIN_W = 80;
 export const chipMinH = (def: ChipDef) => (Math.max(def.inputs.length, def.outputs.length, 1) + 1) * GRID;
@@ -260,6 +273,9 @@ export function chipGeom(def: ChipDef, ow?: number, oh?: number): CompGeom {
     names.map((name, i) => ({ x, y: GRID * Math.round(((i + 1) * hu) / (rows + 1)), name }));
   return { name: def.name, sub: `${def.inputs.length} in · ${def.outputs.length} out`, w, h, ins: mk(def.inputs, -20), outs: mk(def.outputs, w + 20) };
 }
+
+const bitRows = (n: number, h: number, x: number): Pin[] =>
+  Array.from({ length: n }, (_, i) => ({ x, y: n === 1 ? h / 2 : Math.round(i * (h / (n - 1))) }));
 
 export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'w' | 'h'>, lib: ChipLib): CompGeom {
   if (c.type === 'CHIP') {
@@ -285,14 +301,26 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'w' | 'h'>, l
   }
 
   if (c.type === 'COMB') {
-    // like a multi-input gate: 2–4 bit inputs (MSB on top), one 4-bit bus out
-    const n = clampGateIns(c.nIns ?? 4);
+    // N one-bit inputs (MSB on top), one N-bit bus output
+    const n = clampBits(c.nIns ?? 4);
     const h = Math.max(40, (n - 1) * GRID);
-    const step = h / (n - 1);
     return {
       ...PRIM.COMB, h,
-      ins: Array.from({ length: n }, (_, i) => ({ x: -20, y: Math.round(i * step) })),
-      outs: [{ x: 80, y: h / 2, bits: 4 }],
+      ins: bitRows(n, h, -20),
+      outs: [{ x: 80, y: h / 2, bits: n }],
+      sub: `${n} bits → bus`,
+    };
+  }
+
+  if (c.type === 'SPLIT') {
+    // One N-bit bus input, N one-bit outputs (MSB on top)
+    const n = clampBits(c.nIns ?? 4);
+    const h = Math.max(40, (n - 1) * GRID);
+    return {
+      ...PRIM.SPLIT, h,
+      ins: [{ x: -20, y: h / 2, bits: n, name: 'BUS' }],
+      outs: bitRows(n, h, 100),
+      sub: `bus → ${n} bits`,
     };
   }
 
@@ -405,10 +433,16 @@ function evalPrim(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFire
     }
 
     case 'COMB': {
-      // first pin is the MSB; unused high bits pad with 0 automatically
+      // first pin is the MSB
       let v = 0;
-      for (const b of ins) v = (v << 1) | bit(b);
+      for (const b of ins) v = v * 2 + bit(b);
       return [v];
+    }
+
+    case 'SPLIT': {
+      const n = g.outs.length;
+      const v = Math.max(0, Math.floor(ins[0] ?? 0));
+      return Array.from({ length: n }, (_, i) => Math.floor(v / (2 ** (n - 1 - i))) % 2);
     }
 
     default:

@@ -114,9 +114,17 @@ function compMarkup(c: Comp, lib: ChipLib): string {
       <text class="tunnelname" x="46" y="24"${ctr(46, 20)}>${esc(c.label?.trim() || '?')}</text>` +
       caption('TUNNEL', 40, 52);
   } else if (c.type === 'COMB') {
+    const n = g.ins.length;
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>0000</text>` +
+      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${'0'.repeat(n)}</text>` +
       caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
+  } else if (c.type === 'SPLIT') {
+    const n = g.outs.length;
+    inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${'0'.repeat(n)}</text>`;
+    g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
+    g.outs.forEach((p, i) => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>2${n - 1 - i}</text>`; });
+    inner += caption(c.label || 'SPLIT', g.w / 2, g.h + 14);
   } else if (isMemoryType(c.type)) {
     const edge = defaultEdgeForComp(c);
     inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>

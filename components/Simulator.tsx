@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Board, ChipDef, ChipLib, CompType, PALETTE_ORDER, getGeom,
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
-  isMemoryType,
+  isMemoryType, isBusToolType, MAX_WIRE_BITS,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
@@ -85,6 +85,7 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     case 'SSEG': body = <><rect x="0" y="0" width="100" height="160" rx="9" fill={fill} stroke={stroke} strokeWidth="2.5" /><rect x="28" y="8" width="64" height="144" rx="7" fill="#141417" /><text x="60" y="118" textAnchor="middle" fill="var(--led-on)" fontSize="96" fontFamily="ui-monospace,Menlo,monospace">8</text></>; break;
     case 'TUN': body = <><path d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x="46" y="25" textAnchor="middle" fill="var(--muted)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">T1</text></>; break;
     case 'COMB': body = <><rect x="0" y="0" width="60" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,0 H0 M-8,20 H0 M-8,40 H0 M-8,60 H0 M60,30 H70" stroke="var(--lo)" strokeWidth="2" /><text x="30" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
+    case 'SPLIT': body = <><rect x="0" y="0" width="80" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,30 H0 M80,0 H90 M80,20 H90 M80,40 H90 M80,60 H90" stroke="var(--lo)" strokeWidth="2" /><text x="40" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
     case 'IPIN': body = <><rect x="0" y="0" width="40" height="40" rx="7" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'OPIN': body = <><circle cx="20" cy="20" r="19" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'CHIP': body = <><rect x="0" y="0" width={g.w} height={g.h} rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="12" cy="10" r="2.5" fill="var(--muted)" /></>; break;
@@ -450,18 +451,36 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         {sel?.kind === 'wire' && (
           <div id="bitsgrp" title="Bus width — how many bits this wire carries">
             <span>bits</span>
-            {[1, 2, 4, 8].map(n => (
-              <button
-                key={n}
-                className={sel.bits === n ? 'on' : ''}
-                aria-pressed={sel.bits === n}
-                onClick={() => api().setWireBits(sel.id, n)}
-              >{n}</button>
-            ))}
+            <input
+              className="mono"
+              type="number"
+              min={1}
+              max={MAX_WIRE_BITS}
+              step={1}
+              value={sel.bits ?? 1}
+              aria-label="Wire bus width"
+              onChange={e => api().setWireBits(sel.id, e.target.valueAsNumber)}
+            />
           </div>
         )}
 
-        {sel?.kind === 'comp' && sel.nIns != null && (
+        {sel?.kind === 'comp' && sel.nIns != null && sel.type && isBusToolType(sel.type) && (
+          <div id="ningrp" title="Bus bit width">
+            <span>bits</span>
+            <input
+              className="mono"
+              type="number"
+              min={1}
+              max={MAX_WIRE_BITS}
+              step={1}
+              value={sel.nIns}
+              aria-label="Bus bit width"
+              onChange={e => api().setNumInputs(sel.id, e.target.valueAsNumber)}
+            />
+          </div>
+        )}
+
+        {sel?.kind === 'comp' && sel.nIns != null && (!sel.type || !isBusToolType(sel.type)) && (
           <div id="ningrp" title="Number of inputs">
             <span>inputs</span>
             {[2, 3, 4].map(n => (

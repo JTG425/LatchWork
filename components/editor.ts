@@ -10,7 +10,7 @@
     SimState, newSimState, getGeom, evaluateNet, analyzeNets,
     normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
     MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, CHIP_MIN_W, chipMinH,
-    SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType,
+    SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType, isBusToolType,
   } from '@/lib/engine';
   import { GATE_DEFS, isGateType } from '@/lib/gates';
 
@@ -21,7 +21,7 @@
     type?: CompType;
     label?: string;
     labelable?: boolean;
-    nIns?: number;      // gates / bit combiners with an editable input count
+    nIns?: number;      // gates: input count; bus tools: bit count
     freq?: number;      // clocks
     bits?: number;      // wires: bus width
     edgeable?: boolean; // gates/chips can be sampled on a clock edge
@@ -169,8 +169,9 @@
         labelable: c.type === 'IN' || c.type === 'BTN' || c.type === 'OUT' || c.type === 'CHIP'
           || c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'CLK'
           || c.type === 'TUN' || c.type === 'SSEG',
-        nIns: MULTI_IN_GATES.has(c.type) || c.type === 'COMB'
-          ? clampGateIns(c.nIns ?? (c.type === 'COMB' ? 4 : 2)) : undefined,
+        nIns: MULTI_IN_GATES.has(c.type)
+          ? clampGateIns(c.nIns)
+          : isBusToolType(c.type) ? clampBits(c.nIns ?? 4) : undefined,
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
         edgeable: edgeableComp(c),
         edge: defaultEdgeForComp(c),
@@ -350,13 +351,27 @@
       } else if (c.type === 'COMB') {
         const v = sim.vals[c.id + ':0'] | 0;
         const n = g.ins.length;
+        const mask = (2 ** n) - 1;
         inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${(v & 15).toString(2).padStart(4, '0')}</text>`;
+          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${(v % (mask + 1)).toString(2).padStart(n, '0')}</text>`;
         g.ins.forEach((p, i) => {
           // MSB on top: label each pin with its bit weight
           inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>2${sup(n - 1 - i)}</text>`;
         });
         inner += caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
+      } else if (c.type === 'SPLIT') {
+        const n = g.outs.length;
+        const v = c._ins?.[0] ?? 0;
+        const mask = (2 ** n) - 1;
+        inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${(v % (mask + 1)).toString(2).padStart(n, '0')}</text>`;
+        g.ins.forEach(p => {
+          inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`;
+        });
+        g.outs.forEach((p, i) => {
+          inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>2${sup(n - 1 - i)}</text>`;
+        });
+        inner += caption(c.label || 'SPLIT', g.w / 2, g.h + 14);
       } else if (isMemoryType(c.type)) {
         const edge = defaultEdgeForComp(c);
         const q = sim.vals[c.id + ':0'] | 0;
@@ -411,7 +426,7 @@
         out += `<g><path class="wirehit" data-wire="${w.id}" d="${d}"/><path class="wire${bits > 1 ? ' bus' : ''}${hi ? ' hi' : ''}${selCls}" d="${d}"/></g>`;
         if (bits > 1) {
           // live bus readout, MSB first, padded to the wire's width
-          const v = hi & ((1 << bits) - 1);
+          const v = Math.max(0, hi) % (2 ** bits);
           out += `<text class="buslabel${hi ? ' hi' : ''}" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 9}"
             text-anchor="middle">${v.toString(2).padStart(bits, '0')}</text>`;
         }
@@ -540,7 +555,7 @@
       };
       if (placing.type === 'IN' || placing.type === 'IPIN') c.on = false;
       if (placing.type === 'CLK') c.freq = 1;
-      if (placing.type === 'COMB') c.nIns = 4;
+      if (isBusToolType(placing.type)) c.nIns = 4;
       const edge = defaultEdgeForComp(c);
       if (edge) c.edge = edge;
       comps.push(c);
@@ -985,10 +1000,16 @@
       },
       setNumInputs(id, n) {
         const c = find(id);
-        if (!c || !(MULTI_IN_GATES.has(c.type) || c.type === 'COMB')) return;
-        c.nIns = clampGateIns(n);
+        if (!c || !(MULTI_IN_GATES.has(c.type) || isBusToolType(c.type))) return;
+        c.nIns = MULTI_IN_GATES.has(c.type) ? clampGateIns(n) : clampBits(n);
+        const g = getGeom(c, lib());
         wires = wires.filter(w => ![w.a, w.b].some(e =>
-          isPinEnd(e) && e.comp === id && e.side === 'in' && e.pin >= c.nIns!));
+          isPinEnd(e) && e.comp === id && e.pin >= g[e.side === 'out' ? 'outs' : 'ins'].length));
+        for (const w of wires) {
+          if (![w.a, w.b].some(e => isPinEnd(e) && e.comp === id)) continue;
+          const b = Math.max(pinBits(w.a), pinBits(w.b));
+          if (b > 1) w.bits = b; else delete w.bits;
+        }
         pruneAttached();
         if (selIds.has(id)) emitSel();
         refresh();
