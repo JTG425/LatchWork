@@ -9,8 +9,8 @@
     GRID, Comp, Wire, WireEnd, PinEnd, Vec, Board, ChipLib, CompType, EdgeMode,
     SimState, newSimState, getGeom, evaluateNet, analyzeNets,
     normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
-    MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, CHIP_MIN_W, chipMinH,
-    SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType, isBusToolType,
+    MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, maskBits, CHIP_MIN_W, chipMinH,
+    SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType, isBusToolType, chipLabelOffset,
   } from '@/lib/engine';
   import { GATE_DEFS, isGateType } from '@/lib/gates';
 
@@ -24,6 +24,8 @@
     nIns?: number;      // gates: input count; bus tools: bit count
     freq?: number;      // clocks
     bits?: number;      // wires: bus width
+    pinBits?: number;   // IPIN/OPIN/VAL: port bus width
+    val?: number;       // VAL / multi-bit IPIN: driven value (bus integer)
     edgeable?: boolean; // gates/chips can be sampled on a clock edge
     edge?: EdgeMode;
   }
@@ -54,6 +56,8 @@
     resetView(): void;
     setLabel(id: string, label: string): void;
     setNumInputs(id: string, n: number): void;
+    setPinBits(id: string, bits: number): void;
+    setValue(id: string, val: number): void;
     setFreq(id: string, hz: number): void;
     setEdge(id: string, edge: EdgeMode | null): void;
     setWireBits(id: string, bits: number): void;
@@ -126,6 +130,7 @@
     let clipboard: { comps: Comp[]; wires: Wire[] } | null = null;
     let spaceDown = false;
     let lastPt = { x: 0, y: 0, over: false };
+    let hoverWire: string | null = null;   // wire under cursor while the wire tool is armed
 
     const lib = () => cb.getLib();
 
@@ -161,17 +166,64 @@
       if (w.via?.length) return `M${a.x},${a.y} ` + w.via.map(v => `L${v.x},${v.y}`).join(' ') + ` L${b.x},${b.y}`;
       return wirePath(a.x, a.y, b.x, b.y);
     }
+    /* The corner points of a wire's drawn path — mirrors wirePath()'s
+       auto-route so we can measure against the exact rendered polyline. */
+    function wirePolyline(w: Wire): Vec[] {
+      const a = endPos(w.a), b = endPos(w.b);
+      if (w.via?.length) return [a, ...w.via, b];
+      const { x: x1, y: y1 } = a, { x: x2, y: y2 } = b;
+      if (x2 >= x1 + 20) {
+        const mx = snap((x1 + x2) / 2);
+        return [a, { x: mx, y: y1 }, { x: mx, y: y2 }, b];
+      }
+      const my = snap((y1 + y2) / 2);
+      return [a, { x: x1 + 20, y: y1 }, { x: x1 + 20, y: my }, { x: x2 - 20, y: my }, { x: x2 - 20, y: y2 }, b];
+    }
+    /* Nearest point ON a wire's path to `p`, snapped to a grid dot that
+       lies on the wire — so a split's junction sits exactly where the
+       branch meets the host wire. */
+    function attachPointOnWire(w: Wire, p: Vec): Vec {
+      const pts = wirePolyline(w);
+      let best: Vec = { x: snap(p.x), y: snap(p.y) };
+      let bestD = Infinity;
+      for (let i = 0; i + 1 < pts.length; i++) {
+        const s = pts[i], e = pts[i + 1];
+        const dx = e.x - s.x, dy = e.y - s.y;
+        const len2 = dx * dx + dy * dy;
+        const t = len2 ? Math.max(0, Math.min(1, ((p.x - s.x) * dx + (p.y - s.y) * dy) / len2)) : 0;
+        const proj = { x: s.x + dx * t, y: s.y + dy * t };
+        let hit: Vec;
+        if (s.y === e.y) {             // horizontal: snap x along the run
+          const lo = Math.min(s.x, e.x), hi = Math.max(s.x, e.x);
+          hit = { x: Math.max(lo, Math.min(hi, snap(proj.x))), y: s.y };
+        } else if (s.x === e.x) {      // vertical: snap y along the run
+          const lo = Math.min(s.y, e.y), hi = Math.max(s.y, e.y);
+          hit = { x: s.x, y: Math.max(lo, Math.min(hi, snap(proj.y))) };
+        } else {                       // (via can be diagonal) snap both
+          hit = { x: snap(proj.x), y: snap(proj.y) };
+        }
+        const d = (hit.x - p.x) ** 2 + (hit.y - p.y) ** 2;
+        if (d < bestD) { bestD = d; best = hit; }
+      }
+      return best;
+    }
     const find = (id: string) => comps.find(c => c.id === id);
 
     function selInfoFor(c: Comp): SelInfo {
+      const isPort = c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL';
+      const portBits = isPort ? clampBits(c.bits ?? 1) : undefined;
+      // VAL always takes a typed value; an IPIN only once it's a bus
+      const valued = c.type === 'VAL' || (c.type === 'IPIN' && (portBits ?? 1) > 1);
       return {
         kind: 'comp', id: c.id, type: c.type, label: c.label || '',
         labelable: c.type === 'IN' || c.type === 'BTN' || c.type === 'OUT' || c.type === 'CHIP'
           || c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'CLK'
-          || c.type === 'TUN' || c.type === 'SSEG',
+          || c.type === 'TUN' || c.type === 'SSEG' || c.type === 'VAL',
         nIns: MULTI_IN_GATES.has(c.type)
           ? clampGateIns(c.nIns)
           : isBusToolType(c.type) ? clampBits(c.nIns ?? 4) : undefined,
+        pinBits: portBits,
+        val: valued ? maskBits(c.val, portBits ?? 1) : undefined,
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
         edgeable: edgeableComp(c),
         edge: defaultEdgeForComp(c),
@@ -202,7 +254,7 @@
     }
     function setWireTool(on: boolean) {
       wireTool = on;
-      if (!on && wiring) wiring = null;
+      if (!on) { hoverWire = null; if (wiring) wiring = null; }
       cb.onWireTool?.(on);
       render();
     }
@@ -258,16 +310,20 @@
         `<circle class="pinhit" data-pin="${c.id}|${side}|${idx}" cx="${p.x}" cy="${p.y}" r="10"/>
          <circle class="pin ${hi ? 'hi' : ''}" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
 
+      // for chips, a pin stub connects to whichever body edge it faces
+      // (layout may place inputs on the right, outputs on the left)
+      const chipEdge = (px: number) => (px < 0 ? 0 : g.w);
       g.ins.forEach((p, i) => {
         const hi = c._ins?.[i] ?? 0;
         // stub ends slightly inside the body; overshoot hides under the fill
-        const bx = c.type === 'CHIP' ? 0 : isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8;
+        const bx = c.type === 'CHIP' ? chipEdge(p.x) : isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8;
         stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${p.x},${p.y} L${bx},${p.y}"/>`;
         pins += pinSVG('in', i, p, hi);
       });
       g.outs.forEach((p, i) => {
         const hi = sim.vals[c.id + ':' + i] | 0;
-        stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${g.w},${p.y} L${p.x},${p.y}"/>`;
+        const bx = c.type === 'CHIP' ? chipEdge(p.x) : g.w;
+        stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${bx},${p.y} L${p.x},${p.y}"/>`;
         pins += pinSVG('out', i, p, hi);
       });
 
@@ -306,15 +362,34 @@
             fill="none" stroke="${on ? 'var(--hi)' : 'var(--muted)'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
           caption(`${c.label || 'CLK'} · ${clampFreq(c.freq)}Hz`, 30, 52);
       } else if (c.type === 'IPIN') {
-        const on = !!c.on;
-        inner = `<rect class="body pinport ${on ? 'hi' : ''}" x="0" y="0" width="40" height="40" rx="7"/>
-          <text class="pindigit ${on ? 'hi' : ''}" x="20" y="26"${ctr(20, 20)}>${on ? 1 : 0}</text>` +
-          caption(`▸ ${c.label || 'IN?'}`, 20, 52);
+        const n = clampBits(c.bits ?? 1);
+        const v = n > 1 ? maskBits(c.val, n) : (c.on ? 1 : 0);
+        const lit = v !== 0;
+        const txt = n > 1 ? v.toString(2).padStart(n, '0') : String(v);
+        const fs = n > 1 ? 12 : 15;
+        inner = `<rect class="body pinport ${lit ? 'hi' : ''}" x="0" y="0" width="${g.w}" height="40" rx="7"/>
+          <text class="pindigit ${lit ? 'hi' : ''}" x="${g.w / 2}" y="25" style="font-size:${fs}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
+          caption(`▸ ${c.label || 'IN?'}${n > 1 ? ` · ${n}b` : ''}`, g.w / 2, 52);
       } else if (c.type === 'OPIN') {
-        const lit = c._ins?.[0] ?? 0;
-        inner = `<circle class="body pinport ${lit ? 'hi' : ''}" cx="20" cy="20" r="19"/>
-          <text class="pindigit ${lit ? 'hi' : ''}" x="20" y="26"${ctr(20, 20)}>${lit ? 1 : 0}</text>` +
-          caption(`${c.label || 'OUT?'} ▸`, 20, 52);
+        const n = clampBits(c.bits ?? 1);
+        const v = maskBits(c._ins?.[0] ?? 0, n);
+        const lit = v !== 0;
+        const txt = n > 1 ? v.toString(2).padStart(n, '0') : String(v);
+        const fs = n > 1 ? 12 : 15;
+        const shape = n > 1
+          ? `<rect class="body pinport ${lit ? 'hi' : ''}" x="0" y="0" width="${g.w}" height="40" rx="19"/>`
+          : `<circle class="body pinport ${lit ? 'hi' : ''}" cx="20" cy="20" r="19"/>`;
+        inner = `${shape}
+          <text class="pindigit ${lit ? 'hi' : ''}" x="${g.w / 2}" y="25" style="font-size:${fs}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
+          caption(`${c.label || 'OUT?'}${n > 1 ? ` · ${n}b` : ''} ▸`, g.w / 2, 52);
+      } else if (c.type === 'VAL') {
+        const n = clampBits(c.bits ?? 1);
+        const v = maskBits(c.val, n);
+        const lit = v !== 0;
+        const txt = v.toString(2).padStart(n, '0');
+        inner = `<rect class="body" x="0" y="0" width="${g.w}" height="40" rx="9"/>
+          <text class="pindigit ${lit ? 'hi' : ''}" x="${g.w / 2}" y="25" style="font-size:12px"${ctr(g.w / 2, 20)}>${txt}</text>` +
+          caption(`${c.label || 'VAL'} · ${n}b`, g.w / 2, 52);
       } else if (c.type === 'OUT') {
         const lit = c._ins?.[0] ?? 0;
         inner = `<rect class="body" x="0" y="0" width="40" height="40" rx="10"/>
@@ -383,11 +458,20 @@
         g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
         if (edgeLabel) inner += caption(edgeLabel, g.w / 2, g.h + 14);
       } else if (c.type === 'CHIP') {
+        const chipDef = c.chipId ? lib()[c.chipId] : undefined;
+        // side-aware label placement so layout pins on either edge read right
+        const pinLabel = (p: Vec & { name?: string }, i: number, side: 'in' | 'out') => {
+          const off = chipDef ? chipLabelOffset(chipDef, side, i) : { lx: 0, ly: 0 };
+          const left = p.x < 0;
+          const bx = left ? 8 : g.w - 8;
+          const lx = bx + off.lx, ly = p.y + 3 + off.ly;
+          return `<text class="pinname" x="${lx}" y="${ly}" text-anchor="${left ? 'start' : 'end'}"${ctr(bx, p.y)}>${esc(p.name || '')}</text>`;
+        };
         inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
           <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
           <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(g.name)}</text>`;
-        g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
-        g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
+        g.ins.forEach((p, i) => { inner += pinLabel(p, i, 'in'); });
+        g.outs.forEach((p, i) => { inner += pinLabel(p, i, 'out'); });
         if (c.label && c.label !== g.name) inner += caption(`${c.label}${edgeText(c)}`, g.w / 2, g.h + 14);
         else if (c.edge) inner += caption(`${c.edge} edge`, g.w / 2, g.h + 14);
       }
@@ -473,6 +557,16 @@
         out += `<rect class="marquee" x="${x}" y="${y}" width="${w}" height="${h}"/>`;
       }
 
+      // wire-placement cursor: a glowing, enlarged grid dot showing exactly
+      // where the next click lands — snapped onto a hovered wire when splitting
+      if ((wireTool || wiring) && lastPt.over && !drag && !pan && !marquee) {
+        const base = wiring ? { x: wiring.mx, y: wiring.my } : { x: lastPt.x, y: lastPt.y };
+        const hw = hoverWire ? wires.find(w => w.id === hoverWire) : null;
+        const c = hw ? attachPointOnWire(hw, base) : { x: snap(base.x), y: snap(base.y) };
+        out += `<circle class="wirecursor-halo" cx="${c.x}" cy="${c.y}" r="10"/>
+                <circle class="wirecursor" cx="${c.x}" cy="${c.y}" r="4.5"/>`;
+      }
+
       if (placing && placing.over) {
         const g = getGeom(placing as any, lib());
         const f = footprint(placing.rot, g.w, g.h);
@@ -554,6 +648,7 @@
         ...(placing.rot ? { rot: placing.rot } : {}),
       };
       if (placing.type === 'IN' || placing.type === 'IPIN') c.on = false;
+      if (placing.type === 'VAL') { c.bits = 4; c.val = 0; }
       if (placing.type === 'CLK') c.freq = 1;
       if (isBusToolType(placing.type)) c.nIns = 4;
       const edge = defaultEdgeForComp(c);
@@ -679,10 +774,13 @@
         return;
       }
       if (wireEl && wireTool) {
-        // split: attach to the clicked wire at the nearest grid dot
+        // split: attach to the clicked wire at the nearest grid dot that
+        // actually lies on the host wire, so the junction sits on the wire
         const host = (wireEl as SVGElement).dataset.wire!;
-        if (wiring) { finishWire({ wire: host, x: dot.x, y: dot.y }); return; }
-        wiring = { start: { wire: host, x: dot.x, y: dot.y }, via: [], mx: pt.x, my: pt.y, downX: e.clientX, downY: e.clientY, fresh: false };
+        const hw = wires.find(w => w.id === host);
+        const at = hw ? attachPointOnWire(hw, pt) : dot;
+        if (wiring) { finishWire({ wire: host, x: at.x, y: at.y }); return; }
+        wiring = { start: { wire: host, x: at.x, y: at.y }, via: [], mx: pt.x, my: pt.y, downX: e.clientX, downY: e.clientY, fresh: false };
         render();
         return;
       }
@@ -771,6 +869,10 @@
         const r = svg.getBoundingClientRect();
         lastPt = { x: pt.x, y: pt.y, over: e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom };
       }
+      if (wireTool) {
+        const we = (e.target as Element)?.closest?.('[data-wire]');
+        hoverWire = we ? (we as SVGElement).dataset.wire! : null;
+      }
       if (resize) {
         const c = find(resize.id);
         if (!c) { resize = null; return; }
@@ -838,7 +940,10 @@
         placing.over = lastPt.over;
         placing.mx = pt.x; placing.my = pt.y;
         render();
+        return;
       }
+      // keep the wire-placement cursor tracking the pointer on plain hover
+      if (wireTool) render();
     }
 
     function onUp(e: PointerEvent) {
@@ -849,7 +954,8 @@
       }
       if (drag) {
         const c = find(drag.primary);
-        if (c && !drag.moved && (c.type === 'IN' || c.type === 'IPIN')) c.on = !c.on;
+        // click toggles a switch or a 1-bit input pin (bus pins take a typed value)
+        if (c && !drag.moved && (c.type === 'IN' || (c.type === 'IPIN' && clampBits(c.bits ?? 1) === 1))) c.on = !c.on;
         if (c && c.type === 'BTN') c.pressed = false;
         // a plain click inside a group collapses the selection to that part
         if (!drag.moved && !e.shiftKey && selIds.size > 1) setSelection([drag.primary]);
@@ -1012,6 +1118,28 @@
         }
         pruneAttached();
         if (selIds.has(id)) emitSel();
+        refresh();
+      },
+      setPinBits(id, bits) {
+        const c = find(id);
+        if (!c || !(c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL')) return;
+        c.bits = clampBits(bits);
+        if (c.val != null) c.val = maskBits(c.val, c.bits);
+        // re-seed connected wires' bus width from the resized pin
+        for (const w of wires) {
+          if (![w.a, w.b].some(e => isPinEnd(e) && e.comp === id)) continue;
+          const b = Math.max(pinBits(w.a), pinBits(w.b));
+          if (b > 1) w.bits = b; else delete w.bits;
+        }
+        if (selIds.has(id)) emitSel();
+        refresh();
+      },
+      setValue(id, val) {
+        const c = find(id);
+        if (!c || !(c.type === 'VAL' || c.type === 'IPIN')) return;
+        // no emitSel: the value field is a controlled draft; re-emitting
+        // would clobber the user's keystrokes with the canonical form
+        c.val = maskBits(val, clampBits(c.bits ?? 1));
         refresh();
       },
       setFreq(id, hz) {

@@ -8,7 +8,7 @@ export const GRID = 20;
    SPLIT = bus splitter (one N-bit bus → N individual bits, MSB first),
    TUN  = tunnel (named wireless net link). */
 export type CompType =
-  | 'IN' | 'BTN' | 'ONE' | 'CLK'
+  | 'IN' | 'BTN' | 'ONE' | 'CLK' | 'VAL'
   | 'SRLATCH' | 'DLATCH' | 'JKFF' | 'DFF' | 'SRFF' | 'TFF'
   | GateType
   | 'OUT' | 'SSEG' | 'COMB' | 'SPLIT' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP';
@@ -40,12 +40,22 @@ export interface Comp {
   on?: boolean; pressed?: boolean; label?: string; chipId?: string;
   rot?: number;           // 0 right (default), 1 down, 2 left, 3 up
   nIns?: number;          // gates: input count (2-4); bus tools: bit count (1-16)
+  bits?: number;          // IPIN/OPIN/VAL: bus width of the pin (1-16)
+  val?: number;           // VAL / multi-bit IPIN: the driven bus value
   w?: number; h?: number; // chips: user-resized body, grid multiples
   freq?: number;          // CLK: full cycles per second
   edge?: EdgeMode;         // gates/chips: update only on this clock edge
   clockPin?: number;       // optional explicit clock input index
   _ins?: number[];
 }
+
+/* Mask an integer down to n bits (the value a bus of width n carries). */
+export const maskBits = (v: number | undefined, n: number): number => {
+  const width = clampBits(n);
+  const mod = 2 ** width;
+  const iv = Number.isFinite(v) ? Math.floor(v!) : 0;
+  return ((iv % mod) + mod) % mod;
+};
 
 /* Older saves used directed { from: output pin, to: input pin } wires. */
 export function normalizeWires(list: unknown): Wire[] {
@@ -153,6 +163,13 @@ export function analyzeNets(wires: Wire[], unionPins?: string[][]): NetInfo {
 }
 
 export interface Board { comps: Comp[]; wires: Wire[] }
+
+/* Optional user-authored placement for one chip pin.
+   side: which vertical edge it sits on; slot: grid-row index down that
+   edge; lx/ly: pixel nudge for the pin's name label. */
+export interface PinSlot { side: 'L' | 'R'; slot: number; lx: number; ly: number }
+export interface ChipLayout { w: number; h: number; ins: PinSlot[]; outs: PinSlot[] }
+
 export interface ChipDef {
   id: string;
   name: string;
@@ -160,10 +177,17 @@ export interface ChipDef {
   outputs: string[];
   inputComps: string[];
   outputComps: string[];
+  inputBits?: number[];   // per-input bus width (default 1)
+  outputBits?: number[];  // per-output bus width (default 1)
+  layout?: ChipLayout;    // custom pin/label placement (default auto)
   comps: Comp[];
   wires: Wire[];
   createdAt: number;
 }
+export const chipInputBits = (def: ChipDef): number[] =>
+  def.inputs.map((_, i) => clampBits(def.inputBits?.[i] ?? 1));
+export const chipOutputBits = (def: ChipDef): number[] =>
+  def.outputs.map((_, i) => clampBits(def.outputBits?.[i] ?? 1));
 export type ChipLib = Record<string, ChipDef>;
 export interface SimState {
   vals: Record<string, number>;
@@ -185,6 +209,7 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
   IN: { name: 'Switch', sub: 'toggle 0 / 1', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
   BTN: { name: 'Button', sub: 'momentary 1', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
   ONE: { name: 'Constant 1', sub: 'always high', w: 40, h: 40, ins: [], outs: [{ x: 60, y: 20 }] },
+  VAL: { name: 'Value', sub: 'binary constant', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20, bits: 4 }] },
   CLK: { name: 'Clock', sub: 'square wave', w: 60, h: 40, ins: [], outs: [{ x: 80, y: 20 }] },
   SRLATCH: {
     name: 'SR Latch', sub: 'set/reset memory', w: 80, h: 60,
@@ -239,7 +264,7 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
 };
 
 export const PALETTE_ORDER: [string, CompType[]][] = [
-  ['Input', ['IN', 'BTN', 'ONE', 'CLK']],
+  ['Input', ['IN', 'BTN', 'ONE', 'VAL', 'CLK']],
   ['Gates', [...GATE_TYPES]],
   ['Memory', ['JKFF', 'SRLATCH', 'DLATCH', 'DFF', 'SRFF', 'TFF']],
   ['Output', ['OUT', 'SSEG']],
@@ -263,21 +288,63 @@ export const CLK_MIN_HZ = 0.1, CLK_MAX_HZ = 20;
 export const clampFreq = (hz?: number) => Math.min(CLK_MAX_HZ, Math.max(CLK_MIN_HZ, hz ?? 1));
 
 export function chipGeom(def: ChipDef, ow?: number, oh?: number): CompGeom {
+  const inBits = chipInputBits(def), outBits = chipOutputBits(def);
+  const sub = `${def.inputs.length} in · ${def.outputs.length} out`;
+  const withBits = (p: Pin, bits: number): Pin => (bits > 1 ? { ...p, bits } : p);
+
+  // User-authored layout: pins on either side at explicit grid rows,
+  // with label nudges. `side` also flips the label's anchor edge.
+  if (def.layout) {
+    const L = def.layout;
+    const w = Math.max(CHIP_MIN_W, Math.round((ow ?? L.w * GRID) / GRID) * GRID);
+    const h = Math.max(GRID * 2, Math.round((oh ?? L.h * GRID) / GRID) * GRID);
+    const hu = Math.round(h / GRID);
+    const mk = (names: string[], bits: number[], slots: PinSlot[]): Pin[] =>
+      names.map((name, i) => {
+        const s = slots[i] ?? { side: 'L' as const, slot: i + 1, lx: 0, ly: 0 };
+        const x = s.side === 'R' ? w + 20 : -20;
+        return withBits({ x, y: GRID * Math.max(0, Math.min(hu, s.slot)), name }, bits[i]);
+      });
+    return { name: def.name, sub, w, h, ins: mk(def.inputs, inBits, L.ins), outs: mk(def.outputs, outBits, L.outs) };
+  }
+
   const rows = Math.max(def.inputs.length, def.outputs.length, 1);
   const autoW = Math.ceil(Math.max(100, 24 + def.name.length * 7 + 24) / GRID) * GRID;
   const w = Math.max(CHIP_MIN_W, Math.round((ow ?? autoW) / GRID) * GRID);
   const h = Math.max(chipMinH(def), Math.round((oh ?? chipMinH(def)) / GRID) * GRID);
   // pins spread evenly over the (possibly resized) body, snapped to the grid
   const hu = h / GRID;
-  const mk = (names: string[], x: number): Pin[] =>
-    names.map((name, i) => ({ x, y: GRID * Math.round(((i + 1) * hu) / (rows + 1)), name }));
-  return { name: def.name, sub: `${def.inputs.length} in · ${def.outputs.length} out`, w, h, ins: mk(def.inputs, -20), outs: mk(def.outputs, w + 20) };
+  const mk = (names: string[], bits: number[], x: number): Pin[] =>
+    names.map((name, i) => withBits({ x, y: GRID * Math.round(((i + 1) * hu) / (rows + 1)), name }, bits[i]));
+  return { name: def.name, sub, w, h, ins: mk(def.inputs, inBits, -20), outs: mk(def.outputs, outBits, w + 20) };
+}
+
+/* Where a pin's name label sits given its side (label anchoring uses
+   pin.x sign in the renderers). Returned offsets come from the layout. */
+export function chipLabelOffset(def: ChipDef, side: 'in' | 'out', idx: number): { lx: number; ly: number } {
+  const slot = def.layout?.[side === 'in' ? 'ins' : 'outs']?.[idx];
+  return { lx: slot?.lx ?? 0, ly: slot?.ly ?? 0 };
+}
+
+/* The auto layout the Save-as-chip editor starts from: inputs down the
+   left edge, outputs down the right, evenly spread. w/h in grid units. */
+export function defaultChipLayout(nIn: number, nOut: number, nameLen = 8): ChipLayout {
+  const rows = Math.max(nIn, nOut, 1);
+  const h = rows + 1;
+  const w = Math.max(Math.ceil(CHIP_MIN_W / GRID), Math.ceil((48 + nameLen * 7) / GRID));
+  const mk = (n: number, side: 'L' | 'R'): PinSlot[] =>
+    Array.from({ length: n }, (_, i) => ({ side, slot: Math.round(((i + 1) * h) / (n + 1)), lx: 0, ly: 0 }));
+  return { w, h, ins: mk(nIn, 'L'), outs: mk(nOut, 'R') };
 }
 
 const bitRows = (n: number, h: number, x: number): Pin[] =>
   Array.from({ length: n }, (_, i) => ({ x, y: n === 1 ? h / 2 : Math.round(i * (h / (n - 1))) }));
 
-export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'w' | 'h'>, lib: ChipLib): CompGeom {
+/* Body width for a port (IPIN/OPIN/VAL) that must show an n-bit binary
+   value — grows with bit count, always a grid multiple. */
+export const pinPortW = (n: number) => Math.max(40, Math.ceil((clampBits(n) * 9 + 20) / GRID) * GRID);
+
+export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' | 'h'>, lib: ChipLib): CompGeom {
   if (c.type === 'CHIP') {
     const def = c.chipId ? lib[c.chipId] : undefined;
     if (def) return chipGeom(def, c.w, c.h);
@@ -322,6 +389,18 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'w' | 'h'>, l
       outs: bitRows(n, h, 100),
       sub: `bus → ${n} bits`,
     };
+  }
+
+  // Ports whose body widens to show an n-bit binary value.
+  if (c.type === 'IPIN' || c.type === 'VAL') {
+    const n = clampBits(c.bits ?? 1);
+    const w = pinPortW(n);
+    return { ...PRIM[c.type], w, outs: [{ x: w + 20, y: 20, ...(n > 1 ? { bits: n } : {}) }] };
+  }
+  if (c.type === 'OPIN') {
+    const n = clampBits(c.bits ?? 1);
+    const w = pinPortW(n);
+    return { ...PRIM.OPIN, w, ins: [{ x: -20, y: 20, ...(n > 1 ? { bits: n } : {}) }] };
   }
 
   return PRIM[c.type];
@@ -418,8 +497,16 @@ function evalPrim(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFire
 
   switch (c.type) {
     case 'IN':
-    case 'IPIN':
       return [c.on ? 1 : 0];
+
+    case 'IPIN': {
+      // 1-bit pins toggle (c.on); wider pins drive a typed bus value.
+      const n = clampBits(c.bits ?? 1);
+      return [n > 1 ? maskBits(c.val, n) : (c.on ? 1 : 0)];
+    }
+
+    case 'VAL':
+      return [maskBits(c.val, clampBits(c.bits ?? 1))];
 
     case 'BTN':
       return [c.pressed ? 1 : 0];
@@ -638,7 +725,8 @@ export function evaluateNet(
           ? evalChip(def, (state.sub[c.id] ??= newSimState()), ins, lib, depth + 1, now)
           : [];
       } else if ((c.type === 'IN' || c.type === 'BTN' || c.type === 'IPIN') && boundIns?.has(c.id)) {
-        outs = [bit(boundIns.get(c.id))];
+        // bound values already masked to the pin's width by evalChip
+        outs = [intVal(boundIns.get(c.id))];
       } else {
         outs = evalPrim(c, g, ins, state, edgeFired, now);
       }
@@ -674,13 +762,19 @@ export function evalChip(
   depth = 0,
   now = Date.now(),
 ): number[] {
+  // Legacy chips (no per-pin bits) keep exact 1-bit-in / raw-out behavior;
+  // chips saved with the pin-width feature mask to each pin's declared bus.
+  const inB = def.inputBits, outB = def.outputBits;
   const bound = new Map<string, number>();
-  def.inputComps.forEach((id, i) => bound.set(id, bit(ins[i])));
+  def.inputComps.forEach((id, i) => bound.set(id, inB ? maskBits(ins[i], inB[i]) : bit(ins[i])));
 
   evaluateNet(def.comps, def.wires, state, lib, bound, depth, now);
 
   const nets = analyzeNets(def.wires, tunnelPinGroups(def.comps));
-  return def.outputComps.map(id => orOverKeys(state, nets.inputDrivers.get(id + ':0')));
+  return def.outputComps.map((id, i) => {
+    const v = orOverKeys(state, nets.inputDrivers.get(id + ':0'));
+    return outB ? maskBits(v, clampBits(outB[i])) : v;
+  });
 }
 
 export interface ChipValidation { ok: boolean; reason?: string }
@@ -702,20 +796,33 @@ export function validateChipSource(board: Board): ChipValidation {
 
 const byPosition = (a: Comp, b: Comp) => (a.y - b.y) || (a.x - b.x);
 
-export function makeChipDef(name: string, board: Board): ChipDef {
+/* The chip's input/output pins, in the top-to-bottom order they become
+   pins. Shared so the Save-as-chip dialog and makeChipDef agree. */
+export function chipPinSources(board: Board): { inComps: Comp[]; outComps: Comp[] } {
+  return {
+    inComps: board.comps.filter(c => c.type === 'IPIN').sort(byPosition),
+    outComps: board.comps.filter(c => c.type === 'OPIN').sort(byPosition),
+  };
+}
+export const chipPinName = (c: Comp, i: number, kind: 'in' | 'out') =>
+  (c.label || `${kind === 'in' ? 'IN' : 'OUT'}${i + 1}`).slice(0, 8);
+
+export function makeChipDef(name: string, board: Board, layout?: ChipLayout): ChipDef {
   const comps: Comp[] = JSON.parse(JSON.stringify(board.comps.map(({ _ins, ...rest }) => rest)));
   const wires: Wire[] = JSON.parse(JSON.stringify(board.wires));
 
-  const inComps = comps.filter(c => c.type === 'IPIN').sort(byPosition);
-  const outComps = comps.filter(c => c.type === 'OPIN').sort(byPosition);
+  const { inComps, outComps } = chipPinSources({ comps, wires });
 
   return {
     id: 'chip_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8),
     name: name.trim().slice(0, 24) || 'Chip',
-    inputs: inComps.map((c, i) => (c.label || `IN${i + 1}`).slice(0, 8)),
-    outputs: outComps.map((c, i) => (c.label || `OUT${i + 1}`).slice(0, 8)),
+    inputs: inComps.map((c, i) => chipPinName(c, i, 'in')),
+    outputs: outComps.map((c, i) => chipPinName(c, i, 'out')),
     inputComps: inComps.map(c => c.id),
     outputComps: outComps.map(c => c.id),
+    inputBits: inComps.map(c => clampBits(c.bits ?? 1)),
+    outputBits: outComps.map(c => clampBits(c.bits ?? 1)),
+    ...(layout ? { layout } : {}),
     comps,
     wires,
     createdAt: Date.now(),

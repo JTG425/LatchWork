@@ -10,6 +10,7 @@
 import {
   Comp, Wire, WireEnd, Vec, ChipDef, ChipLib, GRID,
   getGeom, chipGeom, isPinEnd, isAttachEnd, isMemoryType, defaultEdgeForComp,
+  clampBits, maskBits, chipLabelOffset,
 } from './engine';
 import { GATE_DEFS, isGateType } from './gates';
 
@@ -55,13 +56,15 @@ function compMarkup(c: Comp, lib: ChipLib): string {
     `<text class="lbl" x="${x}" y="${y}"${ctr(x, y)}>${esc(text)}</text>`;
 
   let inner = '', stubs = '', pins = '';
+  const chipEdge = (px: number) => (px < 0 ? 0 : g.w);
   g.ins.forEach(p => {
-    const bx = c.type === 'CHIP' ? 0 : isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8;
+    const bx = c.type === 'CHIP' ? chipEdge(p.x) : isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8;
     stubs += `<path class="stub" d="M${p.x},${p.y} L${bx},${p.y}"/>`;
     pins += `<circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
   });
   g.outs.forEach(p => {
-    stubs += `<path class="stub" d="M${g.w},${p.y} L${p.x},${p.y}"/>`;
+    const bx = c.type === 'CHIP' ? chipEdge(p.x) : g.w;
+    stubs += `<path class="stub" d="M${bx},${p.y} L${p.x},${p.y}"/>`;
     pins += `<circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
   });
 
@@ -89,11 +92,26 @@ function compMarkup(c: Comp, lib: ChipLib): string {
       <path d="M10,27 H19 V13 H29 V27 H39 V13 H49" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
       caption(c.label || 'CLK', 30, 52);
   } else if (c.type === 'IPIN') {
-    inner = `<rect class="body pinport" x="0" y="0" width="40" height="40" rx="7"/>
-      <text class="pindigit" x="20" y="26"${ctr(20, 20)}>0</text>` + caption(`▸ ${c.label || 'IN?'}`, 20, 52);
+    const n = clampBits(c.bits ?? 1);
+    const txt = n > 1 ? '0'.repeat(n) : '0';
+    inner = `<rect class="body pinport" x="0" y="0" width="${g.w}" height="40" rx="7"/>
+      <text class="pindigit" x="${g.w / 2}" y="25" style="font-size:${n > 1 ? 12 : 15}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
+      caption(`▸ ${c.label || 'IN?'}${n > 1 ? ` · ${n}b` : ''}`, g.w / 2, 52);
   } else if (c.type === 'OPIN') {
-    inner = `<circle class="body pinport" cx="20" cy="20" r="19"/>
-      <text class="pindigit" x="20" y="26"${ctr(20, 20)}>0</text>` + caption(`${c.label || 'OUT?'} ▸`, 20, 52);
+    const n = clampBits(c.bits ?? 1);
+    const txt = n > 1 ? '0'.repeat(n) : '0';
+    const shape = n > 1
+      ? `<rect class="body pinport" x="0" y="0" width="${g.w}" height="40" rx="19"/>`
+      : `<circle class="body pinport" cx="20" cy="20" r="19"/>`;
+    inner = `${shape}
+      <text class="pindigit" x="${g.w / 2}" y="25" style="font-size:${n > 1 ? 12 : 15}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
+      caption(`${c.label || 'OUT?'}${n > 1 ? ` · ${n}b` : ''} ▸`, g.w / 2, 52);
+  } else if (c.type === 'VAL') {
+    const n = clampBits(c.bits ?? 1);
+    const v = maskBits(c.val, n);
+    inner = `<rect class="body" x="0" y="0" width="${g.w}" height="40" rx="9"/>
+      <text class="pindigit${v ? ' hi' : ''}" x="${g.w / 2}" y="25" style="font-size:12px"${ctr(g.w / 2, 20)}>${v.toString(2).padStart(n, '0')}</text>` +
+      caption(`${c.label || 'VAL'} · ${n}b`, g.w / 2, 52);
   } else if (c.type === 'OUT') {
     inner = `<rect class="body" x="0" y="0" width="40" height="40" rx="10"/>
       <circle cx="20" cy="20" r="11" fill="#33333b" stroke="#4a4a54" stroke-width="1.5"/>` +
@@ -134,11 +152,18 @@ function compMarkup(c: Comp, lib: ChipLib): string {
     g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
     if (edge) inner += caption(`${edge} edge`, g.w / 2, g.h + 14);
   } else if (c.type === 'CHIP') {
+    const chipDef = c.chipId ? lib[c.chipId] : undefined;
+    const pinLabel = (p: Vec & { name?: string }, i: number, side: 'in' | 'out') => {
+      const off = chipDef ? chipLabelOffset(chipDef, side, i) : { lx: 0, ly: 0 };
+      const left = p.x < 0;
+      const bx = left ? 8 : g.w - 8;
+      return `<text class="pinname" x="${bx + off.lx}" y="${p.y + 3 + off.ly}" text-anchor="${left ? 'start' : 'end'}"${ctr(bx, p.y)}>${esc(p.name || '')}</text>`;
+    };
     inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
       <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
       <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(g.name)}</text>`;
-    g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
-    g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
+    g.ins.forEach((p, i) => { inner += pinLabel(p, i, 'in'); });
+    g.outs.forEach((p, i) => { inner += pinLabel(p, i, 'out'); });
     if (c.edge) inner += caption(`${c.edge} edge`, g.w / 2, g.h + 14);
   }
 
@@ -203,17 +228,19 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
 /* Render the abstracted chip package: body, name, and named pins. */
 export function chipAbstractSVG(def: ChipDef): string {
   const g = chipGeom(def);
+  const edge = (px: number) => (px < 0 ? 0 : g.w);
   let out = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
     <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
     <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}">${esc(def.name)}</text>`;
-  g.ins.forEach(p => {
-    out += `<path class="stub" d="M${p.x},${p.y} L0,${p.y}"/><circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>
-      <text class="pinname" x="8" y="${p.y + 3}" text-anchor="start">${esc(p.name || '')}</text>`;
-  });
-  g.outs.forEach(p => {
-    out += `<path class="stub" d="M${g.w},${p.y} L${p.x},${p.y}"/><circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>
-      <text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end">${esc(p.name || '')}</text>`;
-  });
+  const pin = (p: typeof g.ins[number], i: number, side: 'in' | 'out') => {
+    const off = chipLabelOffset(def, side, i);
+    const left = p.x < 0;
+    const bx = left ? 8 : g.w - 8;
+    return `<path class="stub" d="M${p.x},${p.y} L${edge(p.x)},${p.y}"/><circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>
+      <text class="pinname" x="${bx + off.lx}" y="${p.y + 3 + off.ly}" text-anchor="${left ? 'start' : 'end'}">${esc(p.name || '')}</text>`;
+  };
+  g.ins.forEach((p, i) => { out += pin(p, i, 'in'); });
+  g.outs.forEach((p, i) => { out += pin(p, i, 'out'); });
   const vb = `-26 -8 ${g.w + 52} ${g.h + 16}`;
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="xMidYMid meet"><g class="comp">${out}</g></svg>`;
 }

@@ -2,12 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Board, ChipDef, ChipLib, CompType, PALETTE_ORDER, getGeom,
+  Board, ChipDef, ChipLib, ChipLayout, CompType, PALETTE_ORDER, getGeom,
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
-  isMemoryType, isBusToolType, MAX_WIRE_BITS,
+  isMemoryType, isBusToolType, MAX_WIRE_BITS, clampBits,
+  chipPinSources, chipPinName, defaultChipLayout,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
+import PinLayoutEditor, { LayoutPin } from '@/components/PinLayoutEditor';
 import AuthDialog from '@/components/AuthDialog';
 import CommunityDialog from '@/components/CommunityDialog';
 import ChipAnalysis, { ChipPreview } from '@/components/ChipAnalysis';
@@ -80,6 +82,7 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     case 'IN': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><rect x="11" y="11" width="38" height="18" rx="9" fill="var(--hi)" /><circle cx="40" cy="20" r="7" fill="#f5f5f7" /></>; break;
     case 'BTN': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="30" cy="20" r="11" fill="#3a3a44" stroke={stroke} strokeWidth="1.5" /><circle cx="30" cy="20" r="6" fill="#55555f" /></>; break;
     case 'ONE': body = <><rect x="0" y="0" width="40" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--hi)" fontSize="17" fontWeight="700" fontFamily="ui-monospace,Menlo,monospace">1</text></>; break;
+    case 'VAL': body = <><rect x="0" y="0" width={g.w} height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x={g.w / 2} y="25" textAnchor="middle" fill="var(--hi)" fontSize="11" fontFamily="ui-monospace,Menlo,monospace">1010</text></>; break;
     case 'CLK': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M10,27 H19 V13 H29 V27 H39 V13 H49" fill="none" stroke="var(--hi)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" /></>; break;
     case 'OUT': body = <><rect x="0" y="0" width="40" height="40" rx="10" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="20" cy="20" r="11" fill="var(--led-on)" stroke="#ff6b61" strokeWidth="1.5" /></>; break;
     case 'SSEG': body = <><rect x="0" y="0" width="100" height="160" rx="9" fill={fill} stroke={stroke} strokeWidth="2.5" /><rect x="28" y="8" width="64" height="144" rx="7" fill="#141417" /><text x="60" y="118" textAnchor="middle" fill="var(--led-on)" fontSize="96" fontFamily="ui-monospace,Menlo,monospace">8</text></>; break;
@@ -122,12 +125,17 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const [sel, setSel] = useState<SelInfo | null>(null);
   const [labelDraft, setLabelDraft] = useState('');
   const [freqDraft, setFreqDraft] = useState('');
+  const [valDraft, setValDraft] = useState('');
   const [armed, setArmed] = useState<PlacingInfo | null>(null);
   const [wireTool, setWireTool] = useState(false);
   const [counts, setCounts] = useState({ parts: 0, wires: 0 });
   const [zoom, setZoom] = useState(100);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [chipName, setChipName] = useState('');
+  const [pendingBoard, setPendingBoard] = useState<Board | null>(null);
+  const [layoutIns, setLayoutIns] = useState<LayoutPin[]>([]);
+  const [layoutOuts, setLayoutOuts] = useState<LayoutPin[]>([]);
+  const [chipLayout, setChipLayout] = useState<ChipLayout | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
   const [communityOpen, setCommunityOpen] = useState(false);
@@ -280,6 +288,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         setSel(info);
         setLabelDraft(info?.label ?? '');
         setFreqDraft(info?.freq != null ? String(info.freq) : '');
+        setValDraft(info?.val != null ? info.val.toString(2).padStart(info.pinBits ?? 1, '0') : '');
       },
       onCounts: setCounts,
       onZoom: setZoom,
@@ -357,14 +366,21 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     const board = apiRef.current!.getBoard();
     const v = validateChipSource(board);
     if (!v.ok) { notify(v.reason!); return; }
+    const { inComps, outComps } = chipPinSources(board);
+    const ins = inComps.map((c, i) => ({ name: chipPinName(c, i, 'in'), bits: clampBits(c.bits ?? 1) }));
+    const outs = outComps.map((c, i) => ({ name: chipPinName(c, i, 'out'), bits: clampBits(c.bits ?? 1) }));
+    setPendingBoard(board);
+    setLayoutIns(ins);
+    setLayoutOuts(outs);
+    setChipLayout(defaultChipLayout(ins.length, outs.length));
     setChipName('');
     setDialogOpen(true);
   };
 
   const confirmSaveChip = () => {
     const name = chipName.trim();
-    if (!name) return;
-    const def = makeChipDef(name, apiRef.current!.getBoard());
+    if (!name || !pendingBoard) return;
+    const def = makeChipDef(name, pendingBoard, chipLayout ?? undefined);
     setChips([...chips, def]);
     setDialogOpen(false);
     notify(`Saved “${def.name}” — it’s in your palette under My chips.`);
@@ -420,6 +436,16 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     if (sel && isFinite(hz) && hz > 0) apiRef.current!.setFreq(sel.id, hz);
   };
 
+  const onValueChange = (v: string) => {
+    const clean = v.replace(/[^01]/g, '').slice(0, sel?.pinBits ?? 1);
+    setValDraft(clean);
+    if (sel) apiRef.current!.setValue(sel.id, clean ? parseInt(clean, 2) : 0);
+  };
+
+  const onPinBitsChange = (n: number) => {
+    if (sel && Number.isFinite(n)) apiRef.current!.setPinBits(sel.id, n);
+  };
+
   const clearBoard = () => {
     apiRef.current!.clear();
   };
@@ -431,7 +457,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     <div id="app">
       <div id="titlebar">
         <div id="appname"><LogoMark size={22} />Latchwork<em>digital logic workbench</em></div>
-        <div className="spacer" />
+        <div id="titletools">
 
         {sel?.kind === 'multi' && (
           <div id="selcount" className="mono">{sel.count} parts</div>
@@ -476,6 +502,38 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
               value={sel.nIns}
               aria-label="Bus bit width"
               onChange={e => api().setNumInputs(sel.id, e.target.valueAsNumber)}
+            />
+          </div>
+        )}
+
+        {sel?.kind === 'comp' && sel.val != null && (
+          <div id="valgrp" title="Binary value driven onto the bus (MSB first)">
+            <span>value</span>
+            <input
+              className="mono"
+              type="text"
+              inputMode="numeric"
+              value={valDraft}
+              placeholder="0"
+              maxLength={sel.pinBits ?? 1}
+              aria-label="Binary value"
+              onChange={e => onValueChange(e.target.value)}
+            />
+          </div>
+        )}
+
+        {sel?.kind === 'comp' && sel.pinBits != null && (
+          <div id="pinbitsgrp" title="Pin bus width — how many bits this pin carries">
+            <span>bits</span>
+            <input
+              className="mono"
+              type="number"
+              min={1}
+              max={MAX_WIRE_BITS}
+              step={1}
+              value={sel.pinBits}
+              aria-label="Pin bus width"
+              onChange={e => onPinBitsChange(e.target.valueAsNumber)}
             />
           </div>
         )}
@@ -555,6 +613,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           : auth
             ? <button className="tbtn ghostbtn" onClick={() => setAuthOpen(true)}>Sign in</button>
             : null}
+        </div>
       </div>
 
       <div id="main">
@@ -741,11 +800,11 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
 
       {dialogOpen && (
         <div className="overlay" onPointerDown={e => { if (e.target === e.currentTarget) setDialogOpen(false); }}>
-          <div className="dialog" role="dialog" aria-modal="true" aria-label="Save as chip">
+          <div className="dialog savechipdialog" role="dialog" aria-modal="true" aria-label="Save as chip">
             <h2>Save as chip</h2>
             <p>
               The whole board becomes one reusable part. Its <b>Input pins</b> become the chip&apos;s inputs and
-              its <b>Output pins</b> become its outputs, top to bottom. Their labels become the pin names.
+              its <b>Output pins</b> become its outputs. Arrange the pins and their labels below, then name it.
             </p>
             <input
               autoFocus
@@ -755,7 +814,19 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
               onChange={e => setChipName(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') confirmSaveChip(); if (e.key === 'Escape') setDialogOpen(false); }}
             />
+            {chipLayout && (
+              <PinLayoutEditor
+                inputs={layoutIns}
+                outputs={layoutOuts}
+                name={chipName}
+                layout={chipLayout}
+                onChange={setChipLayout}
+              />
+            )}
             <div className="dialog-actions">
+              <button className="tbtn" onClick={() => setChipLayout(defaultChipLayout(layoutIns.length, layoutOuts.length))}
+                title="Reset pin positions to the default layout">Reset layout</button>
+              <div className="spacer" />
               <button className="tbtn" onClick={() => setDialogOpen(false)}>Cancel</button>
               <button className="tbtn primary" disabled={!chipName.trim()} onClick={confirmSaveChip}>Save chip</button>
             </div>
