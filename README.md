@@ -17,11 +17,15 @@ This zip is configured to use Auth0 only. NextAuth and GitHub OAuth have been re
 - **Memory circuits** — the *Memory* palette folder includes JK Latch, SR Latch, D Latch, D Flip-Flop, SR Flip-Flop, and T Flip-Flop primitives. The JK/T parts default to falling-edge operation so `Q → CLK` ripple counters count cleanly.
 - **Tunnels** — name a tunnel node and it joins the net of every other tunnel with the same name, like an invisible wire. Tunnels are pure junctions: they can sit on either side of a connection.
 - **Palette folders** — the side menu is organized into collapsible groups and can be resized by dragging its right edge; both persist per browser.
+- **Chip folders** — the `▣` button on any saved chip files it into a named folder under *My chips* (collapsible, with counts); folders travel with the chip's saved definition.
+- **Inspector sidebar** — selecting anything on the canvas slides in a panel from the right with its options (name, bus bits, input count, edge trigger, clock frequency, rotate/delete) instead of crowding the titlebar.
+- **Chip peek** — double-click a placed custom chip to watch its internals simulate live with the inputs that copy is receiving; the same popup's *Package & pins* tab moves pins to any of the four edges, resizes the body, and picks a package shape (square, MUX trapezoid, ALU, or a custom outline drawn with the line tool). The package editor also appears in the chip inspector (`i`) and the Save-as-chip dialog.
+- **Safe deletes** — deleting a saved chip asks for confirmation first (it also removes every placed copy).
 - **Edge triggering** — select a primitive gate, clocked memory circuit, or placed custom chip to choose level-sensitive, rising-edge, or falling-edge updates. Custom chips use a pin named `CLK`/`CLOCK` as the trigger when present, otherwise their last input pin.
 
 - **Editor tabs** — the bottom bar works like a spreadsheet's sheet tabs: `+` opens a blank canvas, double-click renames, `×` closes. All tabs (and which one was active) persist to `localStorage` (`latchwork.tabs.v1`; old single-board saves migrate automatically).
 - **Chip inspector** — the `i` button on any saved chip (palette → My chips) opens an auto-generated report: the abstracted chip drawing with a toggle to view its internals, a simulated **truth table**, and for stateful chips a minimized **state machine diagram** (see `lib/analyze.ts`). The same report is shown for community chips.
-- **Edit chip internals** — double-click a custom chip (on the canvas or in the palette) and confirm to open its internal circuit in a new editor tab; **Update chip** in the titlebar applies the changes to every placed copy.
+- **Edit chip internals** — double-click a chip in the palette (or use *Edit internals…* from the peek popup, inspector report, or sidebar) and confirm to open its internal circuit in a new editor tab; **Update chip** in the titlebar applies the changes to every placed copy.
 - **Community chips** — the *Community* button opens a storefront (80% of the screen) backed by the blob store under `communitychips/`:
   - `communitychips/index.json` — listing summaries
   - `communitychips/<id>.json` — full chip (definition + bundled nested-chip dependencies)
