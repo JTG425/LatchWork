@@ -1,6 +1,10 @@
 import { GATE_DEFS, GATE_TYPES, GateType, isGateType } from './gates';
 
 export const GRID = 20;
+const snapG = (v: number) => Math.round(v / GRID) * GRID;
+/* Center of a pin span, snapped onto the grid so single output/input
+   pins of even-pin-count parts never land between two dots. */
+const midRow = (h: number) => snapG(h / 2);
 
 /* Gate types come from the lib/gates registry — one file per gate.
    SSEG = one-digit 7-segment display (8 segment inputs, a–g + dp),
@@ -74,6 +78,48 @@ export function normalizeWires(list: unknown): Wire[] {
 }
 export const migrateChipDef = (def: ChipDef): ChipDef =>
   ({ ...def, wires: normalizeWires(def.wires) });
+
+/* ── wire auto-routing ──────────────────────────────────────────────
+   Corner points for a wire with no user waypoints. Shared by the live
+   editor and the static previews so every renderer draws the same path.
+
+   The route is computed in "signal flow" orientation (out → in); a wire
+   stored in → out is reversed, routed, and flipped back. Rules:
+     · endpoints aligned on x → one straight vertical segment
+     · aligned on y, flowing forward (or between two free ends) → one
+       straight horizontal segment — never a zig-zag
+     · forward runs → classic Z dogleg at a grid-snapped middle column
+     · backward between free ends → a single L corner
+     · backward into/out of a pin → hook around with a clear horizontal
+       run so the wire never cuts through the component bodies          */
+export type EndFacing = 'in' | 'out' | 'free';
+export const wireEndFacing = (e: WireEnd): EndFacing => (isPinEnd(e) ? e.side : 'free');
+
+export function wireRouteCorners(aIn: Vec, bIn: Vec, aFace: EndFacing, bFace: EndFacing): Vec[] {
+  const reversed = aFace === 'in' || (bFace === 'out' && aFace !== 'out');
+  const [a, b] = reversed ? [bIn, aIn] : [aIn, bIn];
+  const [fa, fb] = reversed ? [bFace, aFace] : [aFace, bFace];
+  const { x: x1, y: y1 } = a, { x: x2, y: y2 } = b;
+  const bothFree = fa === 'free' && fb === 'free';
+  const done = (pts: Vec[]) => (reversed ? pts.reverse() : pts);
+
+  if (x1 === x2) return done([a, b]);
+  if (y1 === y2 && (x2 > x1 || bothFree)) return done([a, b]);
+  if (x2 >= x1 + GRID) {
+    const mx = snapG((x1 + x2) / 2);
+    return done([a, { x: mx, y: y1 }, { x: mx, y: y2 }, b]);
+  }
+  if (bothFree) return done([a, { x: x2, y: y1 }, b]);
+  const my = y1 === y2 ? y1 + GRID * 2 : snapG((y1 + y2) / 2);
+  return done([
+    a,
+    { x: x1 + GRID, y: y1 }, { x: x1 + GRID, y: my },
+    { x: x2 - GRID, y: my }, { x: x2 - GRID, y: y2 },
+    b,
+  ]);
+}
+export const wireCornerPath = (pts: Vec[]) =>
+  'M' + pts.map(p => `${p.x},${p.y}`).join(' L');
 
 /* Nets: wires joined end-to-end (including splits onto other wires)
    form one electrical node. Every input pin on a net reads the OR of
@@ -165,10 +211,31 @@ export function analyzeNets(wires: Wire[], unionPins?: string[][]): NetInfo {
 export interface Board { comps: Comp[]; wires: Wire[] }
 
 /* Optional user-authored placement for one chip pin.
-   side: which vertical edge it sits on; slot: grid-row index down that
-   edge; lx/ly: pixel nudge for the pin's name label. */
-export interface PinSlot { side: 'L' | 'R'; slot: number; lx: number; ly: number }
+   side: which edge it sits on (Left/Right/Top/Bottom); slot: grid index
+   along that edge (rows for L/R, columns for T/B); lx/ly: pixel nudge
+   for the pin's name label. Older saves only ever contain L/R. */
+export type PinSide = 'L' | 'R' | 'T' | 'B';
+export interface PinSlot { side: PinSide; slot: number; lx: number; ly: number }
 export interface ChipLayout { w: number; h: number; ins: PinSlot[]; outs: PinSlot[] }
+
+/* Package silhouette drawn for a placed chip. 'custom' uses shapePts —
+   a user-drawn polygon stored as fractions of the body (0..1 × 0..1)
+   so it scales with resizing. */
+export type ChipShape = 'rect' | 'mux' | 'alu' | 'custom';
+const fmt = (v: number) => Math.round(v * 10) / 10;
+export function chipBodyPath(shape: ChipShape | undefined, w: number, h: number, pts?: Vec[]): string | null {
+  if (shape === 'mux') {
+    return `M0,0 L${w},${fmt(h * 0.18)} L${w},${fmt(h * 0.82)} L0,${h} Z`;
+  }
+  if (shape === 'alu') {
+    return `M0,0 L${w},${fmt(h * 0.26)} L${w},${fmt(h * 0.74)} L0,${h} `
+      + `L0,${fmt(h * 0.64)} L${fmt(w * 0.2)},${fmt(h * 0.5)} L0,${fmt(h * 0.36)} Z`;
+  }
+  if (shape === 'custom' && pts && pts.length >= 3) {
+    return 'M' + pts.map(p => `${fmt(p.x * w)},${fmt(p.y * h)}`).join(' L') + ' Z';
+  }
+  return null;
+}
 
 export interface ChipDef {
   id: string;
@@ -180,6 +247,9 @@ export interface ChipDef {
   inputBits?: number[];   // per-input bus width (default 1)
   outputBits?: number[];  // per-output bus width (default 1)
   layout?: ChipLayout;    // custom pin/label placement (default auto)
+  shape?: ChipShape;      // package silhouette (default 'rect')
+  shapePts?: Vec[];       // 'custom' shape polygon, normalized 0..1
+  folder?: string;        // palette folder ("My chips" grouping)
   comps: Comp[];
   wires: Wire[];
   createdAt: number;
@@ -282,7 +352,8 @@ export const clampGateIns = (n?: number) => {
 export const isBusToolType = (type: CompType) => type === 'COMB' || type === 'SPLIT';
 
 export const CHIP_MIN_W = 80;
-export const chipMinH = (def: ChipDef) => (Math.max(def.inputs.length, def.outputs.length, 1) + 1) * GRID;
+export const chipMinH = (def: ChipDef) =>
+  def.layout ? GRID * 2 : (Math.max(def.inputs.length, def.outputs.length, 1) + 1) * GRID;
 
 export const CLK_MIN_HZ = 0.1, CLK_MAX_HZ = 20;
 export const clampFreq = (hz?: number) => Math.min(CLK_MAX_HZ, Math.max(CLK_MIN_HZ, hz ?? 1));
@@ -292,16 +363,20 @@ export function chipGeom(def: ChipDef, ow?: number, oh?: number): CompGeom {
   const sub = `${def.inputs.length} in · ${def.outputs.length} out`;
   const withBits = (p: Pin, bits: number): Pin => (bits > 1 ? { ...p, bits } : p);
 
-  // User-authored layout: pins on either side at explicit grid rows,
-  // with label nudges. `side` also flips the label's anchor edge.
+  // User-authored layout: pins on any of the four edges at explicit
+  // grid slots, with label nudges. The edge also anchors the label.
   if (def.layout) {
     const L = def.layout;
     const w = Math.max(CHIP_MIN_W, Math.round((ow ?? L.w * GRID) / GRID) * GRID);
     const h = Math.max(GRID * 2, Math.round((oh ?? L.h * GRID) / GRID) * GRID);
-    const hu = Math.round(h / GRID);
+    const hu = Math.round(h / GRID), wu = Math.round(w / GRID);
     const mk = (names: string[], bits: number[], slots: PinSlot[]): Pin[] =>
       names.map((name, i) => {
         const s = slots[i] ?? { side: 'L' as const, slot: i + 1, lx: 0, ly: 0 };
+        if (s.side === 'T' || s.side === 'B') {
+          const x = GRID * Math.max(0, Math.min(wu, s.slot));
+          return withBits({ x, y: s.side === 'T' ? -20 : h + 20, name }, bits[i]);
+        }
         const x = s.side === 'R' ? w + 20 : -20;
         return withBits({ x, y: GRID * Math.max(0, Math.min(hu, s.slot)), name }, bits[i]);
       });
@@ -338,7 +413,7 @@ export function defaultChipLayout(nIn: number, nOut: number, nameLen = 8): ChipL
 }
 
 const bitRows = (n: number, h: number, x: number): Pin[] =>
-  Array.from({ length: n }, (_, i) => ({ x, y: n === 1 ? h / 2 : Math.round(i * (h / (n - 1))) }));
+  Array.from({ length: n }, (_, i) => ({ x, y: n === 1 ? midRow(h) : snapG(i * (h / (n - 1))) }));
 
 /* Body width for a port (IPIN/OPIN/VAL) that must show an n-bit binary
    value — grows with bit count, always a grid multiple. */
@@ -360,8 +435,10 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
       const step = h / (n - 1);
       return {
         ...base, h,
-        ins: Array.from({ length: n }, (_, i) => ({ x: -20, y: Math.round(i * step) })),
-        outs: [{ x: 80, y: h / 2 }],
+        ins: Array.from({ length: n }, (_, i) => ({ x: -20, y: snapG(i * step) })),
+        // even input counts put the body's center between two grid rows —
+        // snap the output onto a dot so wires from it can run straight
+        outs: [{ x: 80, y: midRow(h) }],
       };
     }
     return base;
@@ -374,7 +451,7 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
     return {
       ...PRIM.COMB, h,
       ins: bitRows(n, h, -20),
-      outs: [{ x: 80, y: h / 2, bits: n }],
+      outs: [{ x: 80, y: midRow(h), bits: n }],
       sub: `${n} bits → bus`,
     };
   }
@@ -385,7 +462,7 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
     const h = Math.max(40, (n - 1) * GRID);
     return {
       ...PRIM.SPLIT, h,
-      ins: [{ x: -20, y: h / 2, bits: n, name: 'BUS' }],
+      ins: [{ x: -20, y: midRow(h), bits: n, name: 'BUS' }],
       outs: bitRows(n, h, 100),
       sub: `bus → ${n} bits`,
     };
@@ -807,7 +884,13 @@ export function chipPinSources(board: Board): { inComps: Comp[]; outComps: Comp[
 export const chipPinName = (c: Comp, i: number, kind: 'in' | 'out') =>
   (c.label || `${kind === 'in' ? 'IN' : 'OUT'}${i + 1}`).slice(0, 8);
 
-export function makeChipDef(name: string, board: Board, layout?: ChipLayout): ChipDef {
+export interface ChipPackage {
+  layout?: ChipLayout;
+  shape?: ChipShape;
+  shapePts?: Vec[];
+}
+
+export function makeChipDef(name: string, board: Board, pkg?: ChipPackage): ChipDef {
   const comps: Comp[] = JSON.parse(JSON.stringify(board.comps.map(({ _ins, ...rest }) => rest)));
   const wires: Wire[] = JSON.parse(JSON.stringify(board.wires));
 
@@ -822,7 +905,9 @@ export function makeChipDef(name: string, board: Board, layout?: ChipLayout): Ch
     outputComps: outComps.map(c => c.id),
     inputBits: inComps.map(c => clampBits(c.bits ?? 1)),
     outputBits: outComps.map(c => clampBits(c.bits ?? 1)),
-    ...(layout ? { layout } : {}),
+    ...(pkg?.layout ? { layout: pkg.layout } : {}),
+    ...(pkg?.shape && pkg.shape !== 'rect' ? { shape: pkg.shape } : {}),
+    ...(pkg?.shape === 'custom' && pkg.shapePts?.length ? { shapePts: pkg.shapePts } : {}),
     comps,
     wires,
     createdAt: Date.now(),

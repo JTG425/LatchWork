@@ -32,22 +32,30 @@ Install `playwright` in a scratch dir and launch with the pre-installed browser:
   values resolve per net (OR of all output pins on connected wires). Gotcha: Playwright's
   CDP mouse never fires native `dblclick` — use the same-dot-twice path instead.
 - **Interactions**: click a comp body to select (switches/IPINs toggle on click-without-drag);
-  click pin → click empty grid dots (waypoints) → click pin to route a wire; drag empty space
-  for marquee multi-select; ⌘/Ctrl+C/V copy-paste (paste lands at cursor); palette items arm a
-  stamp mode on click (every canvas click places one; esc or re-click disarms); scroll pans,
-  ctrl+scroll/pinch zooms, space- or middle-drag pans; selected chips expose a `[data-resize]`
-  corner grip. R (or the Rotate button) rotates the selection in quarter turns; W (or the
-  Wire button) toggles the wire tool — with it on, any grid dot or existing wire (split)
-  can start/end a wire, and clicking the same dot twice ends a wire in the air.
+  selecting anything slides in the right-hand `#inspector` sidebar with its options (name,
+  bits, inputs, edge, freq, rotate/delete, chip peek/edit) — allow ~400ms for the slide-in
+  animation before querying inside it. Click pin → click empty grid dots (waypoints) → click
+  pin to route a wire; drag empty space for marquee multi-select; ⌘/Ctrl+C/V copy-paste
+  (paste lands at cursor); palette items arm a stamp mode on click (every canvas click places
+  one; esc or re-click disarms); scroll pans, ctrl+scroll/pinch zooms, space- or middle-drag
+  pans; selected chips expose a `[data-resize]` corner grip. R (or the sidebar Rotate button)
+  rotates the selection in quarter turns; W (or the Wire button) toggles the wire tool — with
+  it on, any grid dot or existing wire (split) can start/end a wire, and clicking the same
+  dot twice ends a wire in the air. Double-clicking a placed chip opens the live "peek"
+  popup (`.peekdialog`, tabs: live internals / package editor); deleting a palette chip asks
+  for confirmation in a dialog first.
 - **Assertions**: query the rendered SVG — `.wire.hi`, `.junction`, `.marquee`, `.wirestop`,
   `.comp.selected`, `[data-pin^="<id>|in"]`, `.chipbody` width/height, `.lbl` captions.
   Board saves to localStorage ~400ms (debounced) after changes — wait comfortably past it
-  before reading persisted state, or assert on the DOM.
+  before reading persisted state, or assert on the DOM. Dialogs/sidebar/toast animate via
+  motion/react — give them a few hundred ms before counting elements.
 
 ## Flows worth driving
 
-1. Wire a switch to an LED at the same y (perfectly straight) and toggle it high — the wire must stay visible.
+1. Wire a switch to an LED at the same y (perfectly straight, one `M… L…` segment) and toggle it high — the wire must stay visible.
 2. Fan one output into 2+ wires — expect a `.junction` dot at the pin.
-3. Select a gate → titlebar `#ningrp` sets 2–4 inputs; select a Clock → `#freqgrp` sets Hz.
-4. IPIN/OPIN → "Save as chip" → place from palette → pin labels appear on the chip; drag the corner grip to resize.
+3. Select a gate → sidebar `#ningrp` sets 2–4 inputs; select a Clock → `#freqgrp` sets Hz.
+4. IPIN/OPIN → "Save as chip" (pick a package shape / drag pins to any edge) → place from palette → pin labels appear on the chip; drag the corner grip to resize.
 5. Fresh visitor (no localStorage) gets the SR-latch seed board; pressing SET latches Q.
+6. Double-click a placed custom chip → `.peekdialog` live view lights internal wires per the instance's inputs; "Package & pins" tab edits layout/shape.
+7. Palette chip row hover buttons: `▣` moves it into a folder (`.folderpop`), `i` opens the inspector report (now with a package editor), `×` asks before deleting.

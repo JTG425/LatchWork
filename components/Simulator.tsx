@@ -1,8 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
-  Board, ChipDef, ChipLib, ChipLayout, CompType, PALETTE_ORDER, getGeom,
+  Board, ChipDef, ChipLib, ChipLayout, ChipPackage, ChipShape, CompType, Vec,
+  PALETTE_ORDER, getGeom, chipBodyPath,
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
   isMemoryType, isBusToolType, MAX_WIRE_BITS, clampBits,
   chipPinSources, chipPinName, defaultChipLayout,
@@ -10,6 +12,7 @@ import {
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
 import PinLayoutEditor, { LayoutPin } from '@/components/PinLayoutEditor';
+import PeekDialog, { ChipPackageEditor } from '@/components/PeekDialog';
 import AuthDialog from '@/components/AuthDialog';
 import CommunityDialog from '@/components/CommunityDialog';
 import ChipAnalysis, { ChipPreview } from '@/components/ChipAnalysis';
@@ -87,11 +90,17 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     case 'OUT': body = <><rect x="0" y="0" width="40" height="40" rx="10" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="20" cy="20" r="11" fill="var(--led-on)" stroke="#ff6b61" strokeWidth="1.5" /></>; break;
     case 'SSEG': body = <><rect x="0" y="0" width="100" height="160" rx="9" fill={fill} stroke={stroke} strokeWidth="2.5" /><rect x="28" y="8" width="64" height="144" rx="7" fill="#141417" /><text x="60" y="118" textAnchor="middle" fill="var(--led-on)" fontSize="96" fontFamily="ui-monospace,Menlo,monospace">8</text></>; break;
     case 'TUN': body = <><path d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x="46" y="25" textAnchor="middle" fill="var(--muted)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">T1</text></>; break;
-    case 'COMB': body = <><rect x="0" y="0" width="60" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,0 H0 M-8,20 H0 M-8,40 H0 M-8,60 H0 M60,30 H70" stroke="var(--lo)" strokeWidth="2" /><text x="30" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
-    case 'SPLIT': body = <><rect x="0" y="0" width="80" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,30 H0 M80,0 H90 M80,20 H90 M80,40 H90 M80,60 H90" stroke="var(--lo)" strokeWidth="2" /><text x="40" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
+    case 'COMB': body = <><rect x="0" y="0" width="60" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,0 H0 M-8,20 H0 M-8,40 H0 M-8,60 H0 M60,40 H70" stroke="var(--lo)" strokeWidth="2" /><text x="30" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
+    case 'SPLIT': body = <><rect x="0" y="0" width="80" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,40 H0 M80,0 H90 M80,20 H90 M80,40 H90 M80,60 H90" stroke="var(--lo)" strokeWidth="2" /><text x="40" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
     case 'IPIN': body = <><rect x="0" y="0" width="40" height="40" rx="7" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'OPIN': body = <><circle cx="20" cy="20" r="19" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
-    case 'CHIP': body = <><rect x="0" y="0" width={g.w} height={g.h} rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="12" cy="10" r="2.5" fill="var(--muted)" /></>; break;
+    case 'CHIP': {
+      const d = chipBodyPath(chip?.shape, g.w, g.h, chip?.shapePts);
+      body = d
+        ? <path d={d} fill={fill} stroke={stroke} strokeWidth="1.5" />
+        : <><rect x="0" y="0" width={g.w} height={g.h} rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="12" cy="10" r="2.5" fill="var(--muted)" /></>;
+      break;
+    }
   }
   if (isMemoryType(type)) {
     body = (
@@ -110,6 +119,31 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     <svg width={w * scale} height={h * scale} viewBox={`-4 ${yMin} ${w} ${h}`} style={{ pointerEvents: 'none', flexShrink: 0 }}>
       {body}
     </svg>
+  );
+}
+
+/* Animated modal shell shared by the Simulator's dialogs. */
+function Modal({ children, onDismiss, className, label }: {
+  children: React.ReactNode; onDismiss: () => void; className?: string; label: string;
+}) {
+  return (
+    <motion.div
+      className="overlay"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      transition={{ duration: 0.16 }}
+      onPointerDown={e => { if (e.target === e.currentTarget) onDismiss(); }}
+    >
+      <motion.div
+        className={'dialog' + (className ? ' ' + className : '')}
+        role="dialog" aria-modal="true" aria-label={label}
+        initial={{ opacity: 0, scale: 0.96, y: 10 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.97, y: 8 }}
+        transition={{ type: 'spring', duration: 0.34, bounce: 0.18 }}
+      >
+        {children}
+      </motion.div>
+    </motion.div>
   );
 }
 
@@ -136,11 +170,17 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const [layoutIns, setLayoutIns] = useState<LayoutPin[]>([]);
   const [layoutOuts, setLayoutOuts] = useState<LayoutPin[]>([]);
   const [chipLayout, setChipLayout] = useState<ChipLayout | null>(null);
+  const [chipShape, setChipShape] = useState<ChipShape>('rect');
+  const [chipShapePts, setChipShapePts] = useState<Vec[] | undefined>(undefined);
   const [toast, setToast] = useState<string | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
   const [communityOpen, setCommunityOpen] = useState(false);
   const [inspect, setInspect] = useState<ChipDef | null>(null);
   const [editAsk, setEditAsk] = useState<ChipDef | null>(null);
+  const [deleteAsk, setDeleteAsk] = useState<ChipDef | null>(null);
+  const [peek, setPeek] = useState<{ compId: string; chipId: string } | null>(null);
+  const [folderMenu, setFolderMenu] = useState<string | null>(null);
+  const [newFolder, setNewFolder] = useState('');
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTab, setActiveTab] = useState('');
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -270,6 +310,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const openChipTab = useCallback((def: ChipDef) => {
     setEditAsk(null);
     setInspect(null);
+    setPeek(null);
     const existing = tabsRef.current.find(t => t.chipId === def.id);
     if (existing) { switchTab(existing.id); return; }
     addTab(def.name, JSON.parse(JSON.stringify({ comps: def.comps, wires: def.wires })), def.id);
@@ -278,6 +319,12 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const askEditChip = useCallback((chipId: string) => {
     const def = chipsRef.current[chipId];
     if (def) setEditAsk(def);
+  }, []);
+
+  /* Double-click on a placed chip → peek inside it, live. */
+  const openPeek = useCallback((compId: string, chipId: string) => {
+    if (!chipsRef.current[chipId]) return;
+    setPeek({ compId, chipId });
   }, []);
 
   /* ── mount: editor, then chips, then tabs/boards ── */
@@ -294,7 +341,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       onZoom: setZoom,
       onPlacing: setArmed,
       onWireTool: setWireTool,
-      onChipDblClick: askEditChip,
+      onChipDblClick: openPeek,
       onBoardChange: () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(() => {
@@ -373,6 +420,8 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     setLayoutIns(ins);
     setLayoutOuts(outs);
     setChipLayout(defaultChipLayout(ins.length, outs.length));
+    setChipShape('rect');
+    setChipShapePts(undefined);
     setChipName('');
     setDialogOpen(true);
   };
@@ -380,7 +429,11 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const confirmSaveChip = () => {
     const name = chipName.trim();
     if (!name || !pendingBoard) return;
-    const def = makeChipDef(name, pendingBoard, chipLayout ?? undefined);
+    const def = makeChipDef(name, pendingBoard, {
+      layout: chipLayout ?? undefined,
+      shape: chipShape,
+      shapePts: chipShapePts,
+    });
     setChips([...chips, def]);
     setDialogOpen(false);
     notify(`Saved “${def.name}” — it’s in your palette under My chips.`);
@@ -392,18 +445,50 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     const board = apiRef.current!.getBoard();
     const v = validateChipSource(board);
     if (!v.ok) { notify(v.reason!); return; }
-    const rebuilt = makeChipDef(editingChip.name, board);
-    const updated: ChipDef = { ...rebuilt, id: editingChip.id, createdAt: editingChip.createdAt };
+    const rebuilt = makeChipDef(editingChip.name, board, {
+      layout: editingChip.layout,
+      shape: editingChip.shape,
+      shapePts: editingChip.shapePts,
+    });
+    const updated: ChipDef = {
+      ...rebuilt,
+      id: editingChip.id,
+      createdAt: editingChip.createdAt,
+      ...(editingChip.folder ? { folder: editingChip.folder } : {}),
+    };
     setChips(chips.map(c => (c.id === editingChip.id ? updated : c)));
     notify(`Updated “${editingChip.name}” — every placed copy now uses the new internals.`);
   };
 
-  const deleteChip = (def: ChipDef) => {
+  /* Package edits (pin layout / size / shape) from the peek & info dialogs. */
+  const applyChipPackage = useCallback((chipId: string, pkg: ChipPackage): ChipDef | null => {
+    const cur = chipsRef.current[chipId];
+    if (!cur) return null;
+    const updated: ChipDef = {
+      ...cur,
+      layout: pkg.layout,
+      shape: pkg.shape && pkg.shape !== 'rect' ? pkg.shape : undefined,
+      shapePts: pkg.shape === 'custom' ? pkg.shapePts : undefined,
+    };
+    setChips(Object.values(chipsRef.current).map(c => (c.id === chipId ? updated : c))
+      .sort((a, b) => a.createdAt - b.createdAt));
+    apiRef.current!.rerender();
+    notify(`Updated the “${updated.name}” package — every placed copy uses it.`);
+    return updated;
+  }, [setChips, notify]);
+
+  const requestDeleteChip = (def: ChipDef) => {
     const usedBy = chipUsedBy(def.id, chipsRef.current);
     if (usedBy) { notify(`Can’t delete “${def.name}” — it’s used inside “${usedBy}”.`); return; }
-    apiRef.current!.removeChipInstances(def.id);
-    setChips(chips.filter(c => c.id !== def.id));
-    notify(`Deleted “${def.name}”.`);
+    setDeleteAsk(def);
+  };
+
+  const confirmDeleteChip = () => {
+    if (!deleteAsk) return;
+    apiRef.current!.removeChipInstances(deleteAsk.id);
+    setChips(chips.filter(c => c.id !== deleteAsk.id));
+    notify(`Deleted “${deleteAsk.name}”.`);
+    setDeleteAsk(null);
   };
 
   const placeChip = (def: ChipDef) => {
@@ -423,6 +508,24 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     if (!fresh.length) { notify(`“${defs[0]?.name}” is already in your library.`); return; }
     setChips([...chips, ...fresh]);
     notify(`Added “${defs[0].name}” to My chips${fresh.length > 1 ? ` (+${fresh.length - 1} nested chip${fresh.length > 2 ? 's' : ''})` : ''}.`);
+  };
+
+  /* ── folders ── */
+  const folders = useMemo(() => {
+    const s = new Set<string>();
+    for (const c of chips) if (c.folder) s.add(c.folder);
+    return [...s].sort((a, b) => a.localeCompare(b));
+  }, [chips]);
+
+  const setChipFolder = (id: string, folder?: string) => {
+    const name = folder?.trim().slice(0, 20);
+    setChips(chips.map(c => {
+      if (c.id !== id) return c;
+      const { folder: _f, ...rest } = c;
+      return name ? { ...rest, folder: name } : rest;
+    }));
+    setFolderMenu(null);
+    setNewFolder('');
   };
 
   const onLabelChange = (v: string) => {
@@ -452,139 +555,107 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
 
   const api = () => apiRef.current!;
 
+  const peekDef = peek ? lib[peek.chipId] : undefined;
+
+  /* ── inspector sidebar helpers ── */
+  const selTitle = !sel ? ''
+    : sel.kind === 'wire' ? ((sel.bits ?? 1) > 1 ? 'Bus wire' : 'Wire')
+    : sel.kind === 'multi' ? `${sel.count} parts selected`
+    : sel.type === 'CHIP' ? (sel.chipId && lib[sel.chipId]?.name) || 'Chip'
+    : sel.type ? getGeom({ type: sel.type }, lib).name
+    : '';
+  const selSub = sel?.kind === 'comp' && sel.type
+    ? (sel.type === 'CHIP'
+      ? (sel.chipId && lib[sel.chipId] ? `custom chip · ${lib[sel.chipId].inputs.length} in · ${lib[sel.chipId].outputs.length} out` : 'custom chip')
+      : getGeom({ type: sel.type }, lib).sub)
+    : sel?.kind === 'wire' ? 'select a width to make it a bus'
+    : sel?.kind === 'multi' ? 'drag to move together' : '';
+
+  /* One chip row in the palette (used by folders and the loose list). */
+  const chipRow = (def: ChipDef) => (
+    <div key={def.id} className={'pal-item chip' + (armed?.chipId === def.id ? ' armed' : '')}
+      title="Click to stamp copies on the grid — double-click to edit the internals"
+      onPointerDown={e => {
+        if ((e.target as HTMLElement).closest('.chipdel,.chipinfo,.chipfolder,.folderpop')) return;
+        e.preventDefault(); placeChip(def);
+      }}
+      onDoubleClick={e => {
+        if ((e.target as HTMLElement).closest('.chipdel,.chipinfo,.chipfolder,.folderpop')) return;
+        askEditChip(def.id);
+      }}>
+      <PalIcon type="CHIP" chip={def} />
+      <div style={{ minWidth: 0 }}>
+        <div className="nm ellip">{def.name}</div>
+        <div className="sub">{def.inputs.length} in · {def.outputs.length} out</div>
+      </div>
+      <button className="chipfolder" aria-label={`Move ${def.name} to a folder`} title="Move to folder"
+        onClick={() => { setFolderMenu(folderMenu === def.id ? null : def.id); setNewFolder(''); }}>▣</button>
+      <button className="chipinfo" aria-label={`Inspect ${def.name} — truth table and state machine`}
+        title="Truth table, state machine & package" onClick={() => setInspect(def)}>i</button>
+      <button className="chipdel" aria-label={`Delete ${def.name}`} title="Delete chip"
+        onClick={() => requestDeleteChip(def)}>×</button>
+      <AnimatePresence>
+        {folderMenu === def.id && (
+          <motion.div className="folderpop" onPointerDown={e => e.stopPropagation()}
+            initial={{ opacity: 0, y: -4, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -4, scale: 0.98 }} transition={{ duration: 0.14 }}>
+            <div className="folderpop-head">Move to folder</div>
+            {folders.map(f => (
+              <button key={f} className={'folderpop-item' + (def.folder === f ? ' on' : '')}
+                onClick={() => setChipFolder(def.id, def.folder === f ? undefined : f)}>
+                <span aria-hidden="true">▣</span>{f}{def.folder === f ? ' ✓' : ''}
+              </button>
+            ))}
+            {def.folder && (
+              <button className="folderpop-item" onClick={() => setChipFolder(def.id, undefined)}>
+                <span aria-hidden="true">–</span>No folder
+              </button>
+            )}
+            <div className="folderpop-new">
+              <input
+                value={newFolder}
+                maxLength={20}
+                placeholder="New folder…"
+                onChange={e => setNewFolder(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && newFolder.trim()) setChipFolder(def.id, newFolder);
+                  if (e.key === 'Escape') setFolderMenu(null);
+                }}
+              />
+              <button disabled={!newFolder.trim()} onClick={() => setChipFolder(def.id, newFolder)}>Add</button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+
+  const looseChips = chips.filter(c => !c.folder);
+
+  /* Collapsible palette-group body with a subtle height animation. */
+  const groupBody = (open: boolean, children: React.ReactNode) => (
+    <AnimatePresence initial={false}>
+      {open && (
+        <motion.div
+          key="body"
+          className="pal-groupbody"
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1 }}
+          exit={{ height: 0, opacity: 0 }}
+          transition={{ duration: 0.18, ease: 'easeOut' }}
+        >
+          {children}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+
   /* ── render ── */
   return (
     <div id="app">
       <div id="titlebar">
         <div id="appname"><LogoMark size={22} />Latchwork<em>digital logic workbench</em></div>
         <div id="titletools">
-
-        {sel?.kind === 'multi' && (
-          <div id="selcount" className="mono">{sel.count} parts</div>
-        )}
-
-        {sel?.kind === 'comp' && sel.labelable && (
-          <input
-            className="labelinput mono"
-            value={labelDraft}
-            placeholder="name…"
-            maxLength={12}
-            aria-label="Component name"
-            onChange={e => onLabelChange(e.target.value)}
-          />
-        )}
-
-        {sel?.kind === 'wire' && (
-          <div id="bitsgrp" title="Bus width — how many bits this wire carries">
-            <span>bits</span>
-            <input
-              className="mono"
-              type="number"
-              min={1}
-              max={MAX_WIRE_BITS}
-              step={1}
-              value={sel.bits ?? 1}
-              aria-label="Wire bus width"
-              onChange={e => api().setWireBits(sel.id, e.target.valueAsNumber)}
-            />
-          </div>
-        )}
-
-        {sel?.kind === 'comp' && sel.nIns != null && sel.type && isBusToolType(sel.type) && (
-          <div id="ningrp" title="Bus bit width">
-            <span>bits</span>
-            <input
-              className="mono"
-              type="number"
-              min={1}
-              max={MAX_WIRE_BITS}
-              step={1}
-              value={sel.nIns}
-              aria-label="Bus bit width"
-              onChange={e => api().setNumInputs(sel.id, e.target.valueAsNumber)}
-            />
-          </div>
-        )}
-
-        {sel?.kind === 'comp' && sel.val != null && (
-          <div id="valgrp" title="Binary value driven onto the bus (MSB first)">
-            <span>value</span>
-            <input
-              className="mono"
-              type="text"
-              inputMode="numeric"
-              value={valDraft}
-              placeholder="0"
-              maxLength={sel.pinBits ?? 1}
-              aria-label="Binary value"
-              onChange={e => onValueChange(e.target.value)}
-            />
-          </div>
-        )}
-
-        {sel?.kind === 'comp' && sel.pinBits != null && (
-          <div id="pinbitsgrp" title="Pin bus width — how many bits this pin carries">
-            <span>bits</span>
-            <input
-              className="mono"
-              type="number"
-              min={1}
-              max={MAX_WIRE_BITS}
-              step={1}
-              value={sel.pinBits}
-              aria-label="Pin bus width"
-              onChange={e => onPinBitsChange(e.target.valueAsNumber)}
-            />
-          </div>
-        )}
-
-        {sel?.kind === 'comp' && sel.nIns != null && (!sel.type || !isBusToolType(sel.type)) && (
-          <div id="ningrp" title="Number of inputs">
-            <span>inputs</span>
-            {[2, 3, 4].map(n => (
-              <button
-                key={n}
-                className={sel.nIns === n ? 'on' : ''}
-                aria-pressed={sel.nIns === n}
-                onClick={() => api().setNumInputs(sel.id, n)}
-              >{n}</button>
-            ))}
-          </div>
-        )}
-
-        {sel?.kind === 'comp' && sel.edgeable && (
-          <div id="edgegrp" title="Edge trigger — chips use a CLK/CLOCK pin when present, otherwise the last input">
-            <span>edge</span>
-            {[
-              ...(isMemoryType(sel.type!) ? [] : [{ label: 'level', value: null }]),
-              { label: 'rise', value: 'rise' as const },
-              { label: 'fall', value: 'fall' as const },
-            ].map(opt => (
-              <button
-                key={opt.label}
-                className={(sel.edge ?? null) === opt.value ? 'on' : ''}
-                aria-pressed={(sel.edge ?? null) === opt.value}
-                onClick={() => api().setEdge(sel.id, opt.value)}
-              >{opt.label}</button>
-            ))}
-          </div>
-        )}
-
-        {sel?.kind === 'comp' && sel.type === 'CLK' && (
-          <div id="freqgrp" title="Clock frequency">
-            <input
-              className="mono"
-              type="number"
-              min={0.1}
-              max={20}
-              step={0.5}
-              value={freqDraft}
-              aria-label="Clock frequency in hertz"
-              onChange={e => onFreqChange(e.target.value)}
-            />
-            <span>Hz</span>
-          </div>
-        )}
 
         <div id="livedot"><i />Live</div>
         <div id="zoomgrp">
@@ -595,12 +666,8 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         <button className={'tbtn' + (wireTool ? ' on' : '')} aria-pressed={wireTool}
           title="Wire tool (W) — click any grid dot to start a wire; click an existing wire to split it"
           onClick={() => api().setWireTool(!wireTool)}>Wire</button>
-        <button className="tbtn" disabled={!sel || sel.kind === 'wire'}
-          title="Rotate selection 90° (R)"
-          onClick={() => api().rotateSelection()}>Rotate</button>
         <button className="tbtn" onClick={() => api().resetView()}>Reset view</button>
         <button className="tbtn" onClick={() => api().powerCycle()} title="Zero every signal and latch, like flipping the power">Power cycle</button>
-        <button className="tbtn" disabled={!sel} onClick={() => api().deleteSelection()}>Delete</button>
         <button className="tbtn danger" onClick={clearBoard}>Clear</button>
         <button className="tbtn" onClick={() => setCommunityOpen(true)}
           title="Browse chips shared by other builders — or share your own">Community</button>
@@ -624,7 +691,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                 aria-expanded={!collapsed[head]} onClick={() => toggleGroup(head)}>
                 <span className="chev" aria-hidden="true">▾</span>{head}
               </button>
-              {!collapsed[head] && types.map(t => {
+              {groupBody(!collapsed[head], types.map(t => {
                 const g = getGeom({ type: t }, {});
                 const isArmed = armed?.type === t && !armed?.chipId;
                 return (
@@ -635,7 +702,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                     <div><div className="nm">{g.name}</div><div className="sub">{g.sub}</div></div>
                   </div>
                 );
-              })}
+              }))}
             </div>
           ))}
 
@@ -644,7 +711,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
               aria-expanded={!collapsed['My chips']} onClick={() => toggleGroup('My chips')}>
               <span className="chev" aria-hidden="true">▾</span>My chips
             </button>
-            {!collapsed['My chips'] && (
+            {groupBody(!collapsed['My chips'], (
               <>
                 {chips.length === 0 && (
                   <div className="pal-empty">
@@ -652,30 +719,25 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                     here — like a D flip-flop you can reuse anywhere.
                   </div>
                 )}
-                {chips.map(def => (
-                  <div key={def.id} className={'pal-item chip' + (armed?.chipId === def.id ? ' armed' : '')}
-                    title="Click to stamp copies on the grid — double-click to edit the internals"
-                    onPointerDown={e => {
-                      if ((e.target as HTMLElement).closest('.chipdel,.chipinfo')) return;
-                      e.preventDefault(); placeChip(def);
-                    }}
-                    onDoubleClick={e => {
-                      if ((e.target as HTMLElement).closest('.chipdel,.chipinfo')) return;
-                      askEditChip(def.id);
-                    }}>
-                    <PalIcon type="CHIP" chip={def} />
-                    <div style={{ minWidth: 0 }}>
-                      <div className="nm ellip">{def.name}</div>
-                      <div className="sub">{def.inputs.length} in · {def.outputs.length} out</div>
+                {folders.map(f => {
+                  const inFolder = chips.filter(c => c.folder === f);
+                  const key = 'folder:' + f;
+                  return (
+                    <div key={key} className="pal-folder">
+                      <button className={'pal-subhead' + (collapsed[key] ? ' closed' : '')}
+                        aria-expanded={!collapsed[key]} onClick={() => toggleGroup(key)}>
+                        <span className="chev" aria-hidden="true">▾</span>
+                        <span className="fico" aria-hidden="true">▣</span>
+                        <span className="ellip">{f}</span>
+                        <span className="fcount mono">{inFolder.length}</span>
+                      </button>
+                      {groupBody(!collapsed[key], inFolder.map(chipRow))}
                     </div>
-                    <button className="chipinfo" aria-label={`Inspect ${def.name} — truth table and state machine`}
-                      title="Truth table & state machine" onClick={() => setInspect(def)}>i</button>
-                    <button className="chipdel" aria-label={`Delete ${def.name}`} title="Delete chip"
-                      onClick={() => deleteChip(def)}>×</button>
-                  </div>
-                ))}
+                  );
+                })}
+                {looseChips.map(chipRow)}
               </>
-            )}
+            ))}
           </div>
         </nav>
         <div id="palresize" role="separator" aria-orientation="vertical" aria-label="Resize palette"
@@ -699,8 +761,198 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
             </defs>
             <g id="world" />
           </svg>
-          {toast && <div className="toast" role="status">{toast}</div>}
+          <AnimatePresence>
+            {toast && (
+              <motion.div className="toast" role="status" key="toast"
+                initial={{ opacity: 0, y: 14, x: '-50%' }}
+                animate={{ opacity: 1, y: 0, x: '-50%' }}
+                exit={{ opacity: 0, y: 8, x: '-50%' }}
+                transition={{ type: 'spring', duration: 0.4, bounce: 0.2 }}>
+                {toast}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
+
+        <AnimatePresence>
+          {sel && (
+            <motion.aside
+              id="inspector"
+              key="inspector"
+              aria-label="Selection options"
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: 272, opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ type: 'spring', duration: 0.38, bounce: 0.14 }}
+            >
+              <div className="side-inner">
+                <div className="side-head">
+                  <div>
+                    <div className="side-title ellip">{selTitle}</div>
+                    {selSub && <div className="side-sub ellip">{selSub}</div>}
+                  </div>
+                  <button className="community-close" aria-label="Close options"
+                    onClick={() => api().clearSelection()}>×</button>
+                </div>
+
+                {sel.kind === 'comp' && sel.labelable && (
+                  <label className="side-field">
+                    <span>Name</span>
+                    <input
+                      className="mono"
+                      value={labelDraft}
+                      placeholder="name…"
+                      maxLength={12}
+                      aria-label="Component name"
+                      onChange={e => onLabelChange(e.target.value)}
+                    />
+                  </label>
+                )}
+
+                {sel.kind === 'wire' && (
+                  <label className="side-field" title="Bus width — how many bits this wire carries">
+                    <span>Bits</span>
+                    <input
+                      className="mono"
+                      type="number"
+                      min={1}
+                      max={MAX_WIRE_BITS}
+                      step={1}
+                      value={sel.bits ?? 1}
+                      aria-label="Wire bus width"
+                      onChange={e => api().setWireBits(sel.id, e.target.valueAsNumber)}
+                    />
+                  </label>
+                )}
+
+                {sel.kind === 'comp' && sel.nIns != null && sel.type && isBusToolType(sel.type) && (
+                  <label className="side-field" title="Bus bit width">
+                    <span>Bits</span>
+                    <input
+                      className="mono"
+                      type="number"
+                      min={1}
+                      max={MAX_WIRE_BITS}
+                      step={1}
+                      value={sel.nIns}
+                      aria-label="Bus bit width"
+                      onChange={e => api().setNumInputs(sel.id, e.target.valueAsNumber)}
+                    />
+                  </label>
+                )}
+
+                {sel.kind === 'comp' && sel.pinBits != null && (
+                  <label className="side-field" title="Pin bus width — how many bits this pin carries">
+                    <span>Bits</span>
+                    <input
+                      className="mono"
+                      type="number"
+                      min={1}
+                      max={MAX_WIRE_BITS}
+                      step={1}
+                      value={sel.pinBits}
+                      aria-label="Pin bus width"
+                      onChange={e => onPinBitsChange(e.target.valueAsNumber)}
+                    />
+                  </label>
+                )}
+
+                {sel.kind === 'comp' && sel.val != null && (
+                  <label className="side-field" title="Binary value driven onto the bus (MSB first)">
+                    <span>Value</span>
+                    <input
+                      className="mono"
+                      type="text"
+                      inputMode="numeric"
+                      value={valDraft}
+                      placeholder="0"
+                      maxLength={sel.pinBits ?? 1}
+                      aria-label="Binary value"
+                      onChange={e => onValueChange(e.target.value)}
+                    />
+                  </label>
+                )}
+
+                {sel.kind === 'comp' && sel.nIns != null && (!sel.type || !isBusToolType(sel.type)) && (
+                  <div className="side-field" title="Number of inputs">
+                    <span>Inputs</span>
+                    <div className="side-btnrow" id="ningrp">
+                      {[2, 3, 4].map(n => (
+                        <button
+                          key={n}
+                          className={sel.nIns === n ? 'on' : ''}
+                          aria-pressed={sel.nIns === n}
+                          onClick={() => api().setNumInputs(sel.id, n)}
+                        >{n}</button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {sel.kind === 'comp' && sel.edgeable && (
+                  <div className="side-field" title="Edge trigger — chips use a CLK/CLOCK pin when present, otherwise the last input">
+                    <span>Edge</span>
+                    <div className="side-btnrow" id="edgegrp">
+                      {[
+                        ...(isMemoryType(sel.type!) ? [] : [{ label: 'level', value: null }]),
+                        { label: 'rise', value: 'rise' as const },
+                        { label: 'fall', value: 'fall' as const },
+                      ].map(opt => (
+                        <button
+                          key={opt.label}
+                          className={(sel.edge ?? null) === opt.value ? 'on' : ''}
+                          aria-pressed={(sel.edge ?? null) === opt.value}
+                          onClick={() => api().setEdge(sel.id, opt.value)}
+                        >{opt.label}</button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {sel.kind === 'comp' && sel.type === 'CLK' && (
+                  <label className="side-field" title="Clock frequency" id="freqgrp">
+                    <span>Frequency (Hz)</span>
+                    <input
+                      className="mono"
+                      type="number"
+                      min={0.1}
+                      max={20}
+                      step={0.5}
+                      value={freqDraft}
+                      aria-label="Clock frequency in hertz"
+                      onChange={e => onFreqChange(e.target.value)}
+                    />
+                  </label>
+                )}
+
+                {sel.kind === 'comp' && sel.type === 'CHIP' && sel.chipId && lib[sel.chipId] && (
+                  <div className="side-actions">
+                    <button className="tbtn" onClick={() => openPeek(sel.id, sel.chipId!)}
+                      title="Watch this chip's internals react to its live inputs — and adjust its package">
+                      Peek inside
+                    </button>
+                    <button className="tbtn" onClick={() => askEditChip(sel.chipId!)}
+                      title="Open the chip's circuit in an editor tab">Edit internals…</button>
+                  </div>
+                )}
+
+                <div className="side-actions">
+                  <button className="tbtn" disabled={sel.kind === 'wire'}
+                    title="Rotate selection 90° (R)"
+                    onClick={() => api().rotateSelection()}>Rotate</button>
+                  <button className="tbtn danger" title="Delete selection (⌫)"
+                    onClick={() => api().deleteSelection()}>Delete</button>
+                </div>
+
+                <div className="side-hint">
+                  {sel.kind === 'wire'
+                    ? 'Right-click a wire to delete it. Multi-bit wires draw thicker and show a live readout.'
+                    : 'Drag on the canvas to move. Press R to rotate, ⌫ to delete, esc to deselect.'}
+                </div>
+              </div>
+            </motion.aside>
+          )}
+        </AnimatePresence>
       </div>
 
       <div id="tabbar" role="tablist" aria-label="Editor tabs">
@@ -761,9 +1013,10 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         />
       )}
 
-      {inspect && (
-        <div className="overlay" onPointerDown={e => { if (e.target === e.currentTarget) setInspect(null); }}>
-          <div className="dialog inspectdialog" role="dialog" aria-modal="true" aria-label={`${inspect.name} — behavior`}>
+      <AnimatePresence>
+        {inspect && (
+          <Modal key="inspect" className="inspectdialog" label={`${inspect.name} — behavior`}
+            onDismiss={() => setInspect(null)}>
             <div className="inspect-head">
               <h2>{inspect.name}</h2>
               <span className="community-card-meta">{inspect.inputs.length} in · {inspect.outputs.length} out</span>
@@ -773,18 +1026,38 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
             <div className="inspect-body">
               <ChipPreview def={inspect} lib={lib} tall />
               <ChipAnalysis def={inspect} lib={lib} />
+              <div className="analysis">
+                <h3>Package &amp; pins <em>— drag pins to any edge, resize, or reshape</em></h3>
+              </div>
+              <ChipPackageEditor key={inspect.id} def={inspect}
+                onSave={pkg => { const nd = applyChipPackage(inspect.id, pkg); if (nd) setInspect(nd); }} />
             </div>
             <div className="dialog-actions">
               <button className="tbtn" onClick={() => askEditChip(inspect.id)}>Edit internals…</button>
               <button className="tbtn primary" onClick={() => setInspect(null)}>Done</button>
             </div>
-          </div>
-        </div>
-      )}
+          </Modal>
+        )}
+      </AnimatePresence>
 
-      {editAsk && (
-        <div className="overlay" onPointerDown={e => { if (e.target === e.currentTarget) setEditAsk(null); }}>
-          <div className="dialog" role="dialog" aria-modal="true" aria-label="Edit chip internals">
+      <AnimatePresence>
+        {peek && peekDef && (
+          <PeekDialog
+            key="peek"
+            compId={peek.compId}
+            def={peekDef}
+            lib={lib}
+            getState={id => apiRef.current?.getChipSubState(id) ?? null}
+            onSavePackage={pkg => applyChipPackage(peek.chipId, pkg)}
+            onEditInternals={() => openChipTab(peekDef)}
+            onClose={() => setPeek(null)}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {editAsk && (
+          <Modal key="editask" label="Edit chip internals" onDismiss={() => setEditAsk(null)}>
             <h2>Edit the internals of “{editAsk.name}”?</h2>
             <p>
               Its circuit opens in a <b>new editor tab</b> (bottom bar). Rework the logic, then press{' '}
@@ -794,17 +1067,33 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
               <button className="tbtn" onClick={() => setEditAsk(null)}>No, leave it</button>
               <button className="tbtn primary" autoFocus onClick={() => openChipTab(editAsk)}>Yes, open editor tab</button>
             </div>
-          </div>
-        </div>
-      )}
+          </Modal>
+        )}
+      </AnimatePresence>
 
-      {dialogOpen && (
-        <div className="overlay" onPointerDown={e => { if (e.target === e.currentTarget) setDialogOpen(false); }}>
-          <div className="dialog savechipdialog" role="dialog" aria-modal="true" aria-label="Save as chip">
+      <AnimatePresence>
+        {deleteAsk && (
+          <Modal key="deleteask" label="Delete chip" onDismiss={() => setDeleteAsk(null)}>
+            <h2>Delete “{deleteAsk.name}”?</h2>
+            <p>
+              The chip is removed from <b>My chips</b> and <b>every placed copy</b> of it is deleted
+              from your sheets. This can&apos;t be undone.
+            </p>
+            <div className="dialog-actions">
+              <button className="tbtn" autoFocus onClick={() => setDeleteAsk(null)}>Cancel</button>
+              <button className="tbtn dangerfill" onClick={confirmDeleteChip}>Delete chip</button>
+            </div>
+          </Modal>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {dialogOpen && (
+          <Modal key="savechip" className="savechipdialog" label="Save as chip" onDismiss={() => setDialogOpen(false)}>
             <h2>Save as chip</h2>
             <p>
               The whole board becomes one reusable part. Its <b>Input pins</b> become the chip&apos;s inputs and
-              its <b>Output pins</b> become its outputs. Arrange the pins and their labels below, then name it.
+              its <b>Output pins</b> become its outputs. Arrange the pins, pick a package shape, then name it.
             </p>
             <input
               autoFocus
@@ -821,18 +1110,26 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                 name={chipName}
                 layout={chipLayout}
                 onChange={setChipLayout}
+                shape={chipShape}
+                shapePts={chipShapePts}
+                onShapeChange={(s, pts) => { setChipShape(s); if (pts) setChipShapePts(pts); }}
               />
             )}
             <div className="dialog-actions">
-              <button className="tbtn" onClick={() => setChipLayout(defaultChipLayout(layoutIns.length, layoutOuts.length))}
-                title="Reset pin positions to the default layout">Reset layout</button>
+              <button className="tbtn"
+                onClick={() => {
+                  setChipLayout(defaultChipLayout(layoutIns.length, layoutOuts.length));
+                  setChipShape('rect');
+                  setChipShapePts(undefined);
+                }}
+                title="Reset pin positions and shape to the default layout">Reset layout</button>
               <div className="spacer" />
               <button className="tbtn" onClick={() => setDialogOpen(false)}>Cancel</button>
               <button className="tbtn primary" disabled={!chipName.trim()} onClick={confirmSaveChip}>Save chip</button>
             </div>
-          </div>
-        </div>
-      )}
+          </Modal>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

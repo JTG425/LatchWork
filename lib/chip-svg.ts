@@ -1,22 +1,27 @@
 /* Static SVG renderers for chip previews — the abstracted chip package
-   and its internal circuit. Used by the chip inspector and the
-   community storefront (cards, detail view, upload preview).
+   and its internal circuit. Used by the chip inspector, the peek
+   popup, and the community storefront (cards, detail view, upload
+   preview).
 
    These produce standalone <svg> markup strings using the same class
    names as the live editor (.comp .body/.stub/.pin/.lbl/…), so the
-   global stylesheet makes previews match the canvas exactly. No
-   simulation state is rendered — everything draws in its "off" look. */
+   global stylesheet makes previews match the canvas exactly.
+
+   chipInternalsSVG can optionally take a live SimState (the editor's
+   per-instance sub-state) — then wires, pins, and displays light up
+   with the values the placed chip is computing right now. Without it,
+   everything draws in its "off" look. */
 
 import {
-  Comp, Wire, WireEnd, Vec, ChipDef, ChipLib, GRID,
+  Comp, Wire, WireEnd, Vec, ChipDef, ChipLib, SimState,
   getGeom, chipGeom, isPinEnd, isAttachEnd, isMemoryType, defaultEdgeForComp,
-  clampBits, maskBits, chipLabelOffset,
+  clampBits, maskBits, chipLabelOffset, chipBodyPath, analyzeNets, tunnelPinGroups,
+  wireRouteCorners, wireCornerPath, wireEndFacing, SEG_NAMES,
 } from './engine';
 import { GATE_DEFS, isGateType } from './gates';
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const snap = (v: number) => Math.round(v / GRID) * GRID;
 const edgeText = (c: Pick<Comp, 'edge'>) => c.edge === 'rise' ? ' / rise' : c.edge === 'fall' ? ' / fall' : '';
 
 /* Rotation helpers — same mapping as the editor (components/editor.ts). */
@@ -39,33 +44,39 @@ function rotTransform(rot: number, w: number, h: number): string {
 const footprint = (rot: number, w: number, h: number) =>
   (rot & 1) ? { w: h, h: w } : { w, h };
 
-function wirePath(x1: number, y1: number, x2: number, y2: number) {
-  if (x2 >= x1 + 20) {
-    const mx = snap((x1 + x2) / 2);
-    return `M${x1},${y1} L${mx},${y1} L${mx},${y2} L${x2},${y2}`;
-  }
-  const my = snap((y1 + y2) / 2);
-  return `M${x1},${y1} L${x1 + 20},${y1} L${x1 + 20},${my} L${x2 - 20},${my} L${x2 - 20},${y2} L${x2},${y2}`;
-}
+/* Live values for one component while rendering a running chip. */
+interface LiveVals { ins: number[]; outs: number[] }
 
-function compMarkup(c: Comp, lib: ChipLib): string {
+function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
   const g = getGeom(c, lib);
   const rot = (c.rot ?? 0) & 3;
   const ctr = (x: number, y: number) => rot ? ` transform="rotate(${-rot * 90} ${x} ${y})"` : '';
   const caption = (text: string, x: number, y: number) =>
     `<text class="lbl" x="${x}" y="${y}"${ctr(x, y)}>${esc(text)}</text>`;
+  const inV = (i: number) => lv?.ins[i] ?? 0;
+  const outV = (i: number) => lv?.outs[i] ?? 0;
+  const hiCls = (v: number) => (v ? ' hi' : '');
 
   let inner = '', stubs = '', pins = '';
-  const chipEdge = (px: number) => (px < 0 ? 0 : g.w);
-  g.ins.forEach(p => {
-    const bx = c.type === 'CHIP' ? chipEdge(p.x) : isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8;
-    stubs += `<path class="stub" d="M${p.x},${p.y} L${bx},${p.y}"/>`;
-    pins += `<circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
+  // stub target on the body edge — chips may carry pins on any edge
+  const stubEnd = (p: Vec, out: boolean): Vec => {
+    if (c.type === 'CHIP') {
+      if (p.y < 0) return { x: p.x, y: 8 };
+      if (p.y > g.h) return { x: p.x, y: g.h - 8 };
+      return { x: p.x < 0 ? 8 : g.w - 8, y: p.y };
+    }
+    if (out) return { x: g.w - (isGateType(c.type) ? 12 : 0), y: p.y };
+    return { x: isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8, y: p.y };
+  };
+  g.ins.forEach((p, i) => {
+    const e = stubEnd(p, false);
+    stubs += `<path class="stub${hiCls(inV(i))}" d="M${p.x},${p.y} L${e.x},${e.y}"/>`;
+    pins += `<circle class="pin${hiCls(inV(i))}" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
   });
-  g.outs.forEach(p => {
-    const bx = c.type === 'CHIP' ? chipEdge(p.x) : g.w;
-    stubs += `<path class="stub" d="M${bx},${p.y} L${p.x},${p.y}"/>`;
-    pins += `<circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
+  g.outs.forEach((p, i) => {
+    const e = stubEnd(p, true);
+    stubs += `<path class="stub${hiCls(outV(i))}" d="M${e.x},${e.y} L${p.x},${p.y}"/>`;
+    pins += `<circle class="pin${hiCls(outV(i))}" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
   });
 
   if (isGateType(c.type)) {
@@ -77,77 +88,95 @@ function compMarkup(c: Comp, lib: ChipLib): string {
     if (bub) inner += `<circle cx="${bub.cx}" cy="${bub.cy}" r="${bub.r}" class="body"/>`;
     inner += caption(`${g.name}${edgeText(c)}`, 30, gd.captionY ?? g.h + 21);
   } else if (c.type === 'IN') {
+    const on = lv ? !!outV(0) : false;
     inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
-      <rect x="11" y="11" width="38" height="18" rx="9" fill="#3a3a44"/>
-      <circle cx="20" cy="20" r="7" fill="#f5f5f7"/>` + caption(c.label || 'SW', 30, 52);
+      <rect x="11" y="11" width="38" height="18" rx="9" fill="${on ? 'var(--hi)' : '#3a3a44'}"/>
+      <circle cx="${on ? 40 : 20}" cy="20" r="7" fill="#f5f5f7"/>` +
+      caption(lv ? `${c.label || 'SW'} · ${on ? 1 : 0}` : (c.label || 'SW'), 30, 52);
   } else if (c.type === 'BTN') {
+    const on = lv ? !!outV(0) : false;
     inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
-      <circle cx="30" cy="20" r="11" fill="#3a3a44" stroke="var(--body-stroke)" stroke-width="1.5"/>
-      <circle cx="30" cy="20" r="6" fill="#55555f"/>` + caption(c.label || 'BTN', 30, 52);
+      <circle cx="30" cy="20" r="11" fill="${on ? 'var(--hi)' : '#3a3a44'}" stroke="var(--body-stroke)" stroke-width="1.5"/>
+      <circle cx="30" cy="20" r="${on ? 4.5 : 6}" fill="${on ? '#0d331a' : '#55555f'}"/>` + caption(c.label || 'BTN', 30, 52);
   } else if (c.type === 'ONE') {
     inner = `<rect class="body" x="0" y="0" width="40" height="40" rx="9"/>
       <text class="pindigit hi" x="20" y="26"${ctr(20, 20)}>1</text>` + caption('HIGH', 20, 52);
   } else if (c.type === 'CLK') {
+    const on = lv ? !!outV(0) : false;
     inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
-      <path d="M10,27 H19 V13 H29 V27 H39 V13 H49" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
+      <path d="M10,${on ? 13 : 27} H19 V${on ? 27 : 13} H29 V${on ? 13 : 27} H39 V${on ? 27 : 13} H49" fill="none" stroke="${on ? 'var(--hi)' : 'var(--muted)'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
       caption(c.label || 'CLK', 30, 52);
   } else if (c.type === 'IPIN') {
     const n = clampBits(c.bits ?? 1);
-    const txt = n > 1 ? '0'.repeat(n) : '0';
-    inner = `<rect class="body pinport" x="0" y="0" width="${g.w}" height="40" rx="7"/>
-      <text class="pindigit" x="${g.w / 2}" y="25" style="font-size:${n > 1 ? 12 : 15}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
+    const v = lv ? maskBits(outV(0), n) : 0;
+    const txt = v.toString(2).padStart(n, '0');
+    inner = `<rect class="body pinport${hiCls(v)}" x="0" y="0" width="${g.w}" height="40" rx="7"/>
+      <text class="pindigit${hiCls(v)}" x="${g.w / 2}" y="25" style="font-size:${n > 1 ? 12 : 15}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
       caption(`▸ ${c.label || 'IN?'}${n > 1 ? ` · ${n}b` : ''}`, g.w / 2, 52);
   } else if (c.type === 'OPIN') {
     const n = clampBits(c.bits ?? 1);
-    const txt = n > 1 ? '0'.repeat(n) : '0';
+    const v = lv ? maskBits(inV(0), n) : 0;
+    const txt = v.toString(2).padStart(n, '0');
     const shape = n > 1
-      ? `<rect class="body pinport" x="0" y="0" width="${g.w}" height="40" rx="19"/>`
-      : `<circle class="body pinport" cx="20" cy="20" r="19"/>`;
+      ? `<rect class="body pinport${hiCls(v)}" x="0" y="0" width="${g.w}" height="40" rx="19"/>`
+      : `<circle class="body pinport${hiCls(v)}" cx="20" cy="20" r="19"/>`;
     inner = `${shape}
-      <text class="pindigit" x="${g.w / 2}" y="25" style="font-size:${n > 1 ? 12 : 15}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
+      <text class="pindigit${hiCls(v)}" x="${g.w / 2}" y="25" style="font-size:${n > 1 ? 12 : 15}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
       caption(`${c.label || 'OUT?'}${n > 1 ? ` · ${n}b` : ''} ▸`, g.w / 2, 52);
   } else if (c.type === 'VAL') {
     const n = clampBits(c.bits ?? 1);
     const v = maskBits(c.val, n);
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="40" rx="9"/>
-      <text class="pindigit${v ? ' hi' : ''}" x="${g.w / 2}" y="25" style="font-size:12px"${ctr(g.w / 2, 20)}>${v.toString(2).padStart(n, '0')}</text>` +
+      <text class="pindigit${hiCls(v)}" x="${g.w / 2}" y="25" style="font-size:12px"${ctr(g.w / 2, 20)}>${v.toString(2).padStart(n, '0')}</text>` +
       caption(`${c.label || 'VAL'} · ${n}b`, g.w / 2, 52);
   } else if (c.type === 'OUT') {
+    const lit = lv ? !!inV(0) : false;
     inner = `<rect class="body" x="0" y="0" width="40" height="40" rx="10"/>
-      <circle cx="20" cy="20" r="11" fill="#33333b" stroke="#4a4a54" stroke-width="1.5"/>` +
+      <circle cx="20" cy="20" r="11" fill="${lit ? 'var(--led-on)' : '#33333b'}" stroke="${lit ? '#ff6b61' : '#4a4a54'}" stroke-width="1.5"/>
+      ${lit ? '<circle cx="16.5" cy="16.5" r="3" fill="#ffd7d4" opacity=".85"/>' : ''}` +
       caption(c.label || 'LED', 20, 52);
   } else if (c.type === 'SSEG') {
     const ox = 42, oy = 26, W = 36, H = 104, my = oy + H / 2;
-    const seg = (d: string) => `<path d="${d}" class="seg"/>`;
+    const on = (i: number) => (lv ? (inV(i) ? 1 : 0) : 0);
+    const seg = (i: number, d: string) => `<path d="${d}" class="seg${on(i) ? ' hi' : ''}"/>`;
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="9"/>
       <rect x="28" y="8" width="${g.w - 36}" height="${g.h - 16}" rx="7" fill="#141417"/>`
-      + seg(`M${ox + 4},${oy} H${ox + W - 4}`) + seg(`M${ox + W},${oy + 4} V${my - 4}`)
-      + seg(`M${ox + W},${my + 4} V${oy + H - 4}`) + seg(`M${ox + 4},${oy + H} H${ox + W - 4}`)
-      + seg(`M${ox},${my + 4} V${oy + H - 4}`) + seg(`M${ox},${oy + 4} V${my - 4}`)
-      + seg(`M${ox + 4},${my} H${ox + W - 4}`)
-      + `<circle cx="${ox + W + 12}" cy="${oy + H}" r="4.5" class="seg"/>`
-      + caption(c.label || '7-SEG', g.w / 2, g.h + 14);
+      + seg(0, `M${ox + 4},${oy} H${ox + W - 4}`) + seg(1, `M${ox + W},${oy + 4} V${my - 4}`)
+      + seg(2, `M${ox + W},${my + 4} V${oy + H - 4}`) + seg(3, `M${ox + 4},${oy + H} H${ox + W - 4}`)
+      + seg(4, `M${ox},${my + 4} V${oy + H - 4}`) + seg(5, `M${ox},${oy + 4} V${my - 4}`)
+      + seg(6, `M${ox + 4},${my} H${ox + W - 4}`)
+      + `<circle cx="${ox + W + 12}" cy="${oy + H}" r="4.5" class="seg${on(7) ? ' hi' : ''}"/>`;
+    if (lv) g.ins.forEach((p, i) => {
+      inner += `<text class="pinname" x="10" y="${p.y + 3}" text-anchor="start"${ctr(10, p.y)}>${SEG_NAMES[i]}</text>`;
+    });
+    inner += caption(c.label || '7-SEG', g.w / 2, g.h + 14);
   } else if (c.type === 'TUN') {
-    inner = `<path class="body tunnelbody" d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z"/>
+    const lit = lv ? !!inV(0) : false;
+    inner = `<path class="body tunnelbody${lit ? ' hi' : ''}" d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z"/>
       <text class="tunnelname" x="46" y="24"${ctr(46, 20)}>${esc(c.label?.trim() || '?')}</text>` +
       caption('TUNNEL', 40, 52);
   } else if (c.type === 'COMB') {
     const n = g.ins.length;
+    const mask = (2 ** n) - 1;
+    const v = lv ? Math.max(0, outV(0)) % (mask + 1) : 0;
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${'0'.repeat(n)}</text>` +
+      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${v.toString(2).padStart(n, '0')}</text>` +
       caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
   } else if (c.type === 'SPLIT') {
     const n = g.outs.length;
+    const mask = (2 ** n) - 1;
+    const v = lv ? Math.max(0, inV(0)) % (mask + 1) : 0;
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${'0'.repeat(n)}</text>`;
+      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${v.toString(2).padStart(n, '0')}</text>`;
     g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
     g.outs.forEach((p, i) => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>2${n - 1 - i}</text>`; });
     inner += caption(c.label || 'SPLIT', g.w / 2, g.h + 14);
   } else if (isMemoryType(c.type)) {
     const edge = defaultEdgeForComp(c);
+    const q = lv ? (outV(0) ? 1 : 0) : 0;
     inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
       <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(c.label || g.name)}</text>
-      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 24}"${ctr(g.w / 2, g.h / 2 + 24)}>Q=0</text>`;
+      <text class="combval${q ? ' hi' : ''}" x="${g.w / 2}" y="${g.h / 2 + 24}"${ctr(g.w / 2, g.h / 2 + 24)}>Q=${q}</text>`;
     g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
     g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
     if (edge) inner += caption(`${edge} edge`, g.w / 2, g.h + 14);
@@ -155,13 +184,20 @@ function compMarkup(c: Comp, lib: ChipLib): string {
     const chipDef = c.chipId ? lib[c.chipId] : undefined;
     const pinLabel = (p: Vec & { name?: string }, i: number, side: 'in' | 'out') => {
       const off = chipDef ? chipLabelOffset(chipDef, side, i) : { lx: 0, ly: 0 };
+      if (p.y < 0 || p.y > g.h) {
+        const by = p.y < 0 ? 13 : g.h - 7;
+        return `<text class="pinname" x="${p.x + off.lx}" y="${by + off.ly}" text-anchor="middle"${ctr(p.x, by)}>${esc(p.name || '')}</text>`;
+      }
       const left = p.x < 0;
       const bx = left ? 8 : g.w - 8;
       return `<text class="pinname" x="${bx + off.lx}" y="${p.y + 3 + off.ly}" text-anchor="${left ? 'start' : 'end'}"${ctr(bx, p.y)}>${esc(p.name || '')}</text>`;
     };
-    inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-      <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
-      <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(g.name)}</text>`;
+    const bodyD = chipBodyPath(chipDef?.shape, g.w, g.h, chipDef?.shapePts);
+    inner = (bodyD
+      ? `<path class="body chipbody" d="${bodyD}"/>`
+      : `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+      <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>`)
+      + `<text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(g.name)}</text>`;
     g.ins.forEach((p, i) => { inner += pinLabel(p, i, 'in'); });
     g.outs.forEach((p, i) => { inner += pinLabel(p, i, 'out'); });
     if (c.edge) inner += caption(`${c.edge} edge`, g.w / 2, g.h + 14);
@@ -172,8 +208,9 @@ function compMarkup(c: Comp, lib: ChipLib): string {
   return `<g class="comp" transform="translate(${c.x},${c.y})">${rotated}</g>`;
 }
 
-/* Render a full circuit (a chip's internals, or any board) statically. */
-export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: ChipLib): string {
+/* Render a full circuit (a chip's internals, or any board) statically —
+   or live, when the editor's SimState for that instance is passed. */
+export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: ChipLib, live?: SimState): string {
   const comps = src.comps, wires = src.wires;
   const find = (id: string) => comps.find(c => c.id === id);
   const pinPos = (c: Comp, side: 'in' | 'out', idx: number): Vec => {
@@ -189,6 +226,21 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
       return c ? pinPos(c, e.side, e.pin) : null;
     }
     return { x: (e as Vec).x, y: (e as Vec).y };
+  };
+
+  const nets = analyzeNets(wires, tunnelPinGroups(comps));
+  const netVal = (keys?: string[]) => {
+    let v = 0;
+    if (live && keys) for (const k of keys) v |= live.vals[k] | 0;
+    return v;
+  };
+  const liveFor = (c: Comp): LiveVals | undefined => {
+    if (!live) return undefined;
+    const g = getGeom(c, lib);
+    return {
+      ins: g.ins.map((_, i) => netVal(nets.inputDrivers.get(c.id + ':' + i))),
+      outs: g.outs.map((_, i) => live.vals[c.id + ':' + i] | 0),
+    };
   };
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -208,16 +260,42 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
     const a = endPos(w.a), b = endPos(w.b);
     if (!a || !b) continue;
     grow(a.x, a.y); grow(b.x, b.y);
-    let d: string;
+    const hi = netVal(nets.wireOuts.get(w.id));
+    let pts: Vec[];
     if (w.via?.length) {
       for (const v of w.via) grow(v.x, v.y);
-      d = `M${a.x},${a.y} ` + w.via.map(v => `L${v.x},${v.y}`).join(' ') + ` L${b.x},${b.y}`;
+      pts = [a, ...w.via, b];
     } else {
-      d = wirePath(a.x, a.y, b.x, b.y);
+      pts = wireRouteCorners(a, b, wireEndFacing(w.a), wireEndFacing(w.b));
     }
-    out += `<path class="wire${(w.bits ?? 1) > 1 ? ' bus' : ''}" d="${d}"/>`;
+    const bits = clampBits(w.bits);
+    out += `<path class="wire${bits > 1 ? ' bus' : ''}${hi ? ' hi' : ''}" d="${wireCornerPath(pts)}"/>`;
+    if (live && bits > 1) {
+      const v = Math.max(0, hi) % (2 ** bits);
+      out += `<text class="buslabel${hi ? ' hi' : ''}" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 9}" text-anchor="middle">${v.toString(2).padStart(bits, '0')}</text>`;
+    }
   }
-  for (const c of comps) out += compMarkup(c, lib);
+  for (const c of comps) out += compMarkup(c, lib, liveFor(c));
+
+  // solder dots where several wires meet a pin, and at mid-wire splits
+  for (const [key, count] of nets.pinWireCounts) {
+    if (count < 2) continue;
+    const [compId, side, pin] = key.split(':');
+    const c = find(compId);
+    if (!c) continue;
+    const p = pinPos(c, side as 'in' | 'out', +pin);
+    const hi = side === 'out'
+      ? (live ? live.vals[compId + ':' + pin] | 0 : 0)
+      : netVal(nets.inputDrivers.get(compId + ':' + pin));
+    out += `<circle class="junction${hi ? ' hi' : ''}" cx="${p.x}" cy="${p.y}" r="5"/>`;
+  }
+  for (const w of wires) {
+    for (const e of [w.a, w.b]) {
+      if (!isAttachEnd(e)) continue;
+      const hi = netVal(nets.wireOuts.get(w.id));
+      out += `<circle class="junction${hi ? ' hi' : ''}" cx="${e.x}" cy="${e.y}" r="5"/>`;
+    }
+  }
 
   if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 100; maxY = 100; }
   const pad = 14;
@@ -228,19 +306,39 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
 /* Render the abstracted chip package: body, name, and named pins. */
 export function chipAbstractSVG(def: ChipDef): string {
   const g = chipGeom(def);
-  const edge = (px: number) => (px < 0 ? 0 : g.w);
-  let out = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-    <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
-    <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}">${esc(def.name)}</text>`;
+  const bodyD = chipBodyPath(def.shape, g.w, g.h, def.shapePts);
+  const stubEnd = (p: Vec): Vec => {
+    if (p.y < 0) return { x: p.x, y: 8 };
+    if (p.y > g.h) return { x: p.x, y: g.h - 8 };
+    return { x: p.x < 0 ? 8 : g.w - 8, y: p.y };
+  };
+  let stubs = '', pins = '', labels = '';
   const pin = (p: typeof g.ins[number], i: number, side: 'in' | 'out') => {
     const off = chipLabelOffset(def, side, i);
-    const left = p.x < 0;
-    const bx = left ? 8 : g.w - 8;
-    return `<path class="stub" d="M${p.x},${p.y} L${edge(p.x)},${p.y}"/><circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>
-      <text class="pinname" x="${bx + off.lx}" y="${p.y + 3 + off.ly}" text-anchor="${left ? 'start' : 'end'}">${esc(p.name || '')}</text>`;
+    const e = stubEnd(p);
+    stubs += `<path class="stub" d="M${p.x},${p.y} L${e.x},${e.y}"/>`;
+    pins += `<circle class="pin" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
+    if (p.y < 0 || p.y > g.h) {
+      const by = p.y < 0 ? 13 : g.h - 7;
+      labels += `<text class="pinname" x="${p.x + off.lx}" y="${by + off.ly}" text-anchor="middle">${esc(p.name || '')}</text>`;
+    } else {
+      const left = p.x < 0;
+      const bx = left ? 8 : g.w - 8;
+      labels += `<text class="pinname" x="${bx + off.lx}" y="${p.y + 3 + off.ly}" text-anchor="${left ? 'start' : 'end'}">${esc(p.name || '')}</text>`;
+    }
   };
-  g.ins.forEach((p, i) => { out += pin(p, i, 'in'); });
-  g.outs.forEach((p, i) => { out += pin(p, i, 'out'); });
-  const vb = `-26 -8 ${g.w + 52} ${g.h + 16}`;
+  g.ins.forEach((p, i) => pin(p, i, 'in'));
+  g.outs.forEach((p, i) => pin(p, i, 'out'));
+  const body = bodyD
+    ? `<path class="body chipbody" d="${bodyD}"/>`
+    : `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+    <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>`;
+  const out = stubs + body
+    + `<text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}">${esc(def.name)}</text>` + labels + pins;
+  const hasT = [...g.ins, ...g.outs].some(p => p.y < 0);
+  const hasB = [...g.ins, ...g.outs].some(p => p.y > g.h);
+  const y0 = hasT ? -26 : -8;
+  const y1 = g.h + (hasB ? 26 : 8);
+  const vb = `-26 ${y0} ${g.w + 52} ${y1 - y0}`;
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="xMidYMid meet"><g class="comp">${out}</g></svg>`;
 }

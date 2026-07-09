@@ -11,6 +11,7 @@
     normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
     MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, maskBits, CHIP_MIN_W, chipMinH,
     SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType, isBusToolType, chipLabelOffset,
+    wireRouteCorners, wireCornerPath, wireEndFacing, chipBodyPath,
   } from '@/lib/engine';
   import { GATE_DEFS, isGateType } from '@/lib/gates';
 
@@ -19,6 +20,7 @@
     id: string;
     count?: number;     // multi: number of selected parts
     type?: CompType;
+    chipId?: string;    // CHIP: which library chip this instance places
     label?: string;
     labelable?: boolean;
     nIns?: number;      // gates: input count; bus tools: bit count
@@ -40,14 +42,15 @@
     onBoardChange(): void;
     onPlacing?(p: PlacingInfo | null): void;
     onWireTool?(on: boolean): void;
-    /* double-click on a placed chip — Simulator offers to open its internals */
-    onChipDblClick?(chipId: string): void;
+    /* double-click on a placed chip — Simulator opens the live peek popup */
+    onChipDblClick?(compId: string, chipId: string): void;
   }
 
   export interface EditorApi {
     beginPlace(type: CompType, chipId?: string): void;
     deleteSelection(): void;
     rotateSelection(): void;
+    clearSelection(): void;
     setWireTool(on: boolean): void;
     clear(): void;
     powerCycle(): void;
@@ -64,6 +67,9 @@
     getBoard(): Board;
     setBoard(b: Board): void;
     removeChipInstances(chipId: string): void;
+    /* live simulation state of one placed chip instance (its internals) —
+       the returned object is the editor's own; treat it as read-only */
+    getChipSubState(compId: string): SimState | null;
     rerender(): void;
     destroy(): void;
   }
@@ -153,32 +159,14 @@
       }
       return { x: (e as Vec).x, y: (e as Vec).y };
     }
-    /* auto-route: orthogonal dogleg for wires without user waypoints */
-    function wirePath(x1: number, y1: number, x2: number, y2: number) {
-      if (x2 >= x1 + 20) {
-        const mx = snap((x1 + x2) / 2);
-        return `M${x1},${y1} L${mx},${y1} L${mx},${y2} L${x2},${y2}`;
-      }
-      const my = snap((y1 + y2) / 2);
-      return `M${x1},${y1} L${x1 + 20},${y1} L${x1 + 20},${my} L${x2 - 20},${my} L${x2 - 20},${y2} L${x2},${y2}`;
-    }
-    function wirePathFor(w: Wire, a: Vec, b: Vec) {
-      if (w.via?.length) return `M${a.x},${a.y} ` + w.via.map(v => `L${v.x},${v.y}`).join(' ') + ` L${b.x},${b.y}`;
-      return wirePath(a.x, a.y, b.x, b.y);
-    }
-    /* The corner points of a wire's drawn path — mirrors wirePath()'s
-       auto-route so we can measure against the exact rendered polyline. */
+    /* The corner points of a wire's drawn path — auto-routing lives in
+       lib/engine (wireRouteCorners) so previews render the same shape. */
     function wirePolyline(w: Wire): Vec[] {
       const a = endPos(w.a), b = endPos(w.b);
       if (w.via?.length) return [a, ...w.via, b];
-      const { x: x1, y: y1 } = a, { x: x2, y: y2 } = b;
-      if (x2 >= x1 + 20) {
-        const mx = snap((x1 + x2) / 2);
-        return [a, { x: mx, y: y1 }, { x: mx, y: y2 }, b];
-      }
-      const my = snap((y1 + y2) / 2);
-      return [a, { x: x1 + 20, y: y1 }, { x: x1 + 20, y: my }, { x: x2 - 20, y: my }, { x: x2 - 20, y: y2 }, b];
+      return wireRouteCorners(a, b, wireEndFacing(w.a), wireEndFacing(w.b));
     }
+    const wirePathFor = (w: Wire) => wireCornerPath(wirePolyline(w));
     /* Nearest point ON a wire's path to `p`, snapped to a grid dot that
        lies on the wire — so a split's junction sits exactly where the
        branch meets the host wire. */
@@ -215,7 +203,7 @@
       // VAL always takes a typed value; an IPIN only once it's a bus
       const valued = c.type === 'VAL' || (c.type === 'IPIN' && (portBits ?? 1) > 1);
       return {
-        kind: 'comp', id: c.id, type: c.type, label: c.label || '',
+        kind: 'comp', id: c.id, type: c.type, chipId: c.chipId, label: c.label || '',
         labelable: c.type === 'IN' || c.type === 'BTN' || c.type === 'OUT' || c.type === 'CHIP'
           || c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'CLK'
           || c.type === 'TUN' || c.type === 'SSEG' || c.type === 'VAL',
@@ -310,20 +298,29 @@
         `<circle class="pinhit" data-pin="${c.id}|${side}|${idx}" cx="${p.x}" cy="${p.y}" r="10"/>
          <circle class="pin ${hi ? 'hi' : ''}" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
 
-      // for chips, a pin stub connects to whichever body edge it faces
-      // (layout may place inputs on the right, outputs on the left)
-      const chipEdge = (px: number) => (px < 0 ? 0 : g.w);
+      // where a pin's stub meets the body — chips may carry pins on any
+      // of the four edges, everything else keeps left-in / right-out.
+      // Stubs may end slightly inside the body; overshoot hides under
+      // the fill (stubs render before the body).
+      const stubEnd = (p: Vec, out: boolean): Vec => {
+        if (c.type === 'CHIP') {
+          if (p.y < 0) return { x: p.x, y: 8 };
+          if (p.y > g.h) return { x: p.x, y: g.h - 8 };
+          return { x: p.x < 0 ? 8 : g.w - 8, y: p.y };
+        }
+        if (out) return { x: g.w - (isGateType(c.type) ? 12 : 0), y: p.y };
+        return { x: isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8, y: p.y };
+      };
       g.ins.forEach((p, i) => {
         const hi = c._ins?.[i] ?? 0;
-        // stub ends slightly inside the body; overshoot hides under the fill
-        const bx = c.type === 'CHIP' ? chipEdge(p.x) : isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8;
-        stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${p.x},${p.y} L${bx},${p.y}"/>`;
+        const e = stubEnd(p, false);
+        stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${p.x},${p.y} L${e.x},${e.y}"/>`;
         pins += pinSVG('in', i, p, hi);
       });
       g.outs.forEach((p, i) => {
         const hi = sim.vals[c.id + ':' + i] | 0;
-        const bx = c.type === 'CHIP' ? chipEdge(p.x) : g.w;
-        stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${bx},${p.y} L${p.x},${p.y}"/>`;
+        const e = stubEnd(p, true);
+        stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${e.x},${e.y} L${p.x},${p.y}"/>`;
         pins += pinSVG('out', i, p, hi);
       });
 
@@ -459,17 +456,24 @@
         if (edgeLabel) inner += caption(edgeLabel, g.w / 2, g.h + 14);
       } else if (c.type === 'CHIP') {
         const chipDef = c.chipId ? lib()[c.chipId] : undefined;
-        // side-aware label placement so layout pins on either edge read right
+        // edge-aware label placement so layout pins on any edge read right
         const pinLabel = (p: Vec & { name?: string }, i: number, side: 'in' | 'out') => {
           const off = chipDef ? chipLabelOffset(chipDef, side, i) : { lx: 0, ly: 0 };
+          if (p.y < 0 || p.y > g.h) {
+            const by = p.y < 0 ? 13 : g.h - 7;
+            return `<text class="pinname" x="${p.x + off.lx}" y="${by + off.ly}" text-anchor="middle"${ctr(p.x, by)}>${esc(p.name || '')}</text>`;
+          }
           const left = p.x < 0;
           const bx = left ? 8 : g.w - 8;
           const lx = bx + off.lx, ly = p.y + 3 + off.ly;
           return `<text class="pinname" x="${lx}" y="${ly}" text-anchor="${left ? 'start' : 'end'}"${ctr(bx, p.y)}>${esc(p.name || '')}</text>`;
         };
-        inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-          <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>
-          <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(g.name)}</text>`;
+        const bodyD = chipBodyPath(chipDef?.shape, g.w, g.h, chipDef?.shapePts);
+        inner = (bodyD
+          ? `<path class="body chipbody" d="${bodyD}"/>`
+          : `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
+          <circle cx="12" cy="10" r="2.5" fill="var(--muted)"/>`)
+          + `<text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(g.name)}</text>`;
         g.ins.forEach((p, i) => { inner += pinLabel(p, i, 'in'); });
         g.outs.forEach((p, i) => { inner += pinLabel(p, i, 'out'); });
         if (c.label && c.label !== g.name) inner += caption(`${c.label}${edgeText(c)}`, g.w / 2, g.h + 14);
@@ -505,7 +509,7 @@
         const a = endPos(w.a), b = endPos(w.b);
         const hi = netVal(nets.wireOuts.get(w.id));
         const selCls = selWire === w.id ? ' selected' : '';
-        const d = wirePathFor(w, a, b);
+        const d = wirePathFor(w);
         const bits = clampBits(w.bits);
         out += `<g><path class="wirehit" data-wire="${w.id}" d="${d}"/><path class="wire${bits > 1 ? ' bus' : ''}${hi ? ' hi' : ''}${selCls}" d="${d}"/></g>`;
         if (bits > 1) {
@@ -521,10 +525,8 @@
         let d: string;
         if (wiring.via.length) {
           d = `M${p.x},${p.y} ` + wiring.via.map(v => `L${v.x},${v.y}`).join(' ') + ` L${end.x},${end.y}`;
-        } else if (isPinEnd(wiring.start) && wiring.start.side === 'in') {
-          d = wirePath(end.x, end.y, p.x, p.y);
         } else {
-          d = wirePath(p.x, p.y, end.x, end.y);
+          d = wireCornerPath(wireRouteCorners(p, end, wireEndFacing(wiring.start), 'free'));
         }
         out += `<path class="wirepreview" d="${d}"/>`;
         for (const v of wiring.via) out += `<circle class="wirestop" cx="${v.x}" cy="${v.y}" r="3"/>`;
@@ -850,7 +852,7 @@
         const compEl = (e.target as Element).closest?.('[data-comp]');
         if (compEl) {
           const c = find((compEl as SVGElement).dataset.comp!);
-          if (c && c.type === 'CHIP' && c.chipId) cb.onChipDblClick?.(c.chipId);
+          if (c && c.type === 'CHIP' && c.chipId) cb.onChipDblClick?.(c.id, c.chipId);
         }
         return;
       }
@@ -1094,6 +1096,7 @@
       },
       deleteSelection,
       rotateSelection,
+      clearSelection() { setSelection([]); render(); },
       setWireTool,
       clear() { comps = []; wires = []; sim = newSimState(); setSelection([]); wiring = null; refresh(); },
       powerCycle() { sim = newSimState(); refresh(false); },
@@ -1178,6 +1181,11 @@
         sim = newSimState();
         setSelection([]);
         refresh(false);
+      },
+      getChipSubState(compId) {
+        const c = find(compId);
+        if (!c || c.type !== 'CHIP') return null;
+        return sim.sub[compId] ?? null;
       },
       removeChipInstances(chipId) {
         const doomed = new Set(comps.filter(c => c.chipId === chipId).map(c => c.id));
