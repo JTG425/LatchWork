@@ -15,7 +15,7 @@
 import {
   Comp, Wire, WireEnd, Vec, ChipDef, ChipLib, SimState,
   getGeom, chipGeom, isPinEnd, isAttachEnd, isMemoryType, defaultEdgeForComp,
-  clampBits, maskBits, chipLabelOffset, chipBodyPath, analyzeNets, tunnelPinGroups,
+  clampBits, maskVal, formatBusValue, chipLabelOffset, chipBodyPath, analyzeNets, tunnelPinGroups,
   wireRouteCorners, wireCornerPath, wireEndFacing, SEG_NAMES,
 } from './engine';
 import { GATE_DEFS, isGateType } from './gates';
@@ -45,7 +45,7 @@ const footprint = (rot: number, w: number, h: number) =>
   (rot & 1) ? { w: h, h: w } : { w, h };
 
 /* Live values for one component while rendering a running chip. */
-interface LiveVals { ins: number[]; outs: number[] }
+interface LiveVals { ins: bigint[]; outs: bigint[] }
 
 function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
   const g = getGeom(c, lib);
@@ -53,9 +53,9 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
   const ctr = (x: number, y: number) => rot ? ` transform="rotate(${-rot * 90} ${x} ${y})"` : '';
   const caption = (text: string, x: number, y: number) =>
     `<text class="lbl" x="${x}" y="${y}"${ctr(x, y)}>${esc(text)}</text>`;
-  const inV = (i: number) => lv?.ins[i] ?? 0;
-  const outV = (i: number) => lv?.outs[i] ?? 0;
-  const hiCls = (v: number) => (v ? ' hi' : '');
+  const inV = (i: number) => lv?.ins[i] ?? 0n;
+  const outV = (i: number) => lv?.outs[i] ?? 0n;
+  const hiCls = (v: bigint | number) => (v ? ' hi' : '');
 
   let inner = '', stubs = '', pins = '';
   // stub target on the body edge — chips may carry pins on any edge
@@ -81,12 +81,13 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
 
   if (isGateType(c.type)) {
     const gd = GATE_DEFS[c.type];
+    const gb = clampBits(c.bits ?? 1);
     inner = `<path class="body" d="${gd.body(g.h)}"/>`;
     const curve = gd.backCurve?.(g.h);
     if (curve) inner += `<path d="${curve}" fill="none" stroke="var(--body-stroke)" stroke-width="1.5"/>`;
     const bub = gd.bubble?.(g.h);
     if (bub) inner += `<circle cx="${bub.cx}" cy="${bub.cy}" r="${bub.r}" class="body"/>`;
-    inner += caption(`${g.name}${edgeText(c)}`, 30, gd.captionY ?? g.h + 21);
+    inner += caption(`${g.name}${gb > 1 ? ` · ${gb}b` : ''}${edgeText(c)}`, 30, gd.captionY ?? g.h + 21);
   } else if (c.type === 'IN') {
     const on = lv ? !!outV(0) : false;
     inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
@@ -108,15 +109,15 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
       caption(c.label || 'CLK', 30, 52);
   } else if (c.type === 'IPIN') {
     const n = clampBits(c.bits ?? 1);
-    const v = lv ? maskBits(outV(0), n) : 0;
-    const txt = v.toString(2).padStart(n, '0');
+    const v = lv ? maskVal(outV(0), n) : 0n;
+    const txt = n > 1 ? formatBusValue(v, n) : v.toString();
     inner = `<rect class="body pinport${hiCls(v)}" x="0" y="0" width="${g.w}" height="40" rx="7"/>
       <text class="pindigit${hiCls(v)}" x="${g.w / 2}" y="25" style="font-size:${n > 1 ? 12 : 15}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
       caption(`▸ ${c.label || 'IN?'}${n > 1 ? ` · ${n}b` : ''}`, g.w / 2, 52);
   } else if (c.type === 'OPIN') {
     const n = clampBits(c.bits ?? 1);
-    const v = lv ? maskBits(inV(0), n) : 0;
-    const txt = v.toString(2).padStart(n, '0');
+    const v = lv ? maskVal(inV(0), n) : 0n;
+    const txt = n > 1 ? formatBusValue(v, n) : v.toString();
     const shape = n > 1
       ? `<rect class="body pinport${hiCls(v)}" x="0" y="0" width="${g.w}" height="40" rx="19"/>`
       : `<circle class="body pinport${hiCls(v)}" cx="20" cy="20" r="19"/>`;
@@ -125,9 +126,9 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
       caption(`${c.label || 'OUT?'}${n > 1 ? ` · ${n}b` : ''} ▸`, g.w / 2, 52);
   } else if (c.type === 'VAL') {
     const n = clampBits(c.bits ?? 1);
-    const v = maskBits(c.val, n);
+    const v = maskVal(c.val, n);
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="40" rx="9"/>
-      <text class="pindigit${hiCls(v)}" x="${g.w / 2}" y="25" style="font-size:12px"${ctr(g.w / 2, 20)}>${v.toString(2).padStart(n, '0')}</text>` +
+      <text class="pindigit${hiCls(v)}" x="${g.w / 2}" y="25" style="font-size:12px"${ctr(g.w / 2, 20)}>${formatBusValue(v, n)}</text>` +
       caption(`${c.label || 'VAL'} · ${n}b`, g.w / 2, 52);
   } else if (c.type === 'OUT') {
     const lit = lv ? !!inV(0) : false;
@@ -157,17 +158,15 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
       caption('TUNNEL', 40, 52);
   } else if (c.type === 'COMB') {
     const n = g.ins.length;
-    const mask = (2 ** n) - 1;
-    const v = lv ? Math.max(0, outV(0)) % (mask + 1) : 0;
+    const v = lv ? maskVal(outV(0), n) : 0n;
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${v.toString(2).padStart(n, '0')}</text>` +
+      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${formatBusValue(v, n)}</text>` +
       caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
   } else if (c.type === 'SPLIT') {
     const n = g.outs.length;
-    const mask = (2 ** n) - 1;
-    const v = lv ? Math.max(0, inV(0)) % (mask + 1) : 0;
+    const v = lv ? maskVal(inV(0), n) : 0n;
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${v.toString(2).padStart(n, '0')}</text>`;
+      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${formatBusValue(v, n)}</text>`;
     g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
     g.outs.forEach((p, i) => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>2${n - 1 - i}</text>`; });
     inner += caption(c.label || 'SPLIT', g.w / 2, g.h + 14);
@@ -230,8 +229,8 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
 
   const nets = analyzeNets(wires, tunnelPinGroups(comps));
   const netVal = (keys?: string[]) => {
-    let v = 0;
-    if (live && keys) for (const k of keys) v |= live.vals[k] | 0;
+    let v = 0n;
+    if (live && keys) for (const k of keys) v |= live.vals[k] ?? 0n;
     return v;
   };
   const liveFor = (c: Comp): LiveVals | undefined => {
@@ -239,7 +238,7 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
     const g = getGeom(c, lib);
     return {
       ins: g.ins.map((_, i) => netVal(nets.inputDrivers.get(c.id + ':' + i))),
-      outs: g.outs.map((_, i) => live.vals[c.id + ':' + i] | 0),
+      outs: g.outs.map((_, i) => live.vals[c.id + ':' + i] ?? 0n),
     };
   };
 
@@ -271,8 +270,7 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
     const bits = clampBits(w.bits);
     out += `<path class="wire${bits > 1 ? ' bus' : ''}${hi ? ' hi' : ''}" d="${wireCornerPath(pts)}"/>`;
     if (live && bits > 1) {
-      const v = Math.max(0, hi) % (2 ** bits);
-      out += `<text class="buslabel${hi ? ' hi' : ''}" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 9}" text-anchor="middle">${v.toString(2).padStart(bits, '0')}</text>`;
+      out += `<text class="buslabel${hi ? ' hi' : ''}" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 9}" text-anchor="middle">${formatBusValue(hi, bits)}</text>`;
     }
   }
   for (const c of comps) out += compMarkup(c, lib, liveFor(c));
@@ -285,7 +283,7 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
     if (!c) continue;
     const p = pinPos(c, side as 'in' | 'out', +pin);
     const hi = side === 'out'
-      ? (live ? live.vals[compId + ':' + pin] | 0 : 0)
+      ? (live ? live.vals[compId + ':' + pin] ?? 0n : 0n)
       : netVal(nets.inputDrivers.get(compId + ':' + pin));
     out += `<circle class="junction${hi ? ' hi' : ''}" cx="${p.x}" cy="${p.y}" r="5"/>`;
   }

@@ -29,11 +29,11 @@ export const isPinEnd = (e: WireEnd): e is PinEnd => (e as PinEnd).comp !== unde
 export const isAttachEnd = (e: WireEnd): e is AttachEnd => (e as AttachEnd).wire !== undefined;
 
 /* via: optional user-routed waypoints (grid-snapped), ordered a → b;
-   bits: bus width (1 = plain wire). Signal values are plain integers,
-   so a net carries a whole bus value; `bits` sets how it's masked and
+   bits: bus width (1 = plain wire). Signal values are bigints, so a
+   net carries a whole bus value; `bits` sets how it's masked and
    displayed. */
 export interface Wire { id: string; a: WireEnd; b: WireEnd; via?: Vec[]; bits?: number }
-export const MAX_WIRE_BITS = 16;
+export const MAX_WIRE_BITS = 64;
 export const clampBits = (n?: number) => {
   const v = Number.isFinite(n) ? n! : 1;
   return Math.min(MAX_WIRE_BITS, Math.max(1, Math.round(v)));
@@ -43,23 +43,49 @@ export interface Comp {
   id: string; type: CompType; x: number; y: number;
   on?: boolean; pressed?: boolean; label?: string; chipId?: string;
   rot?: number;           // 0 right (default), 1 down, 2 left, 3 up
-  nIns?: number;          // gates: input count (2-4); bus tools: bit count (1-16)
-  bits?: number;          // IPIN/OPIN/VAL: bus width of the pin (1-16)
-  val?: number;           // VAL / multi-bit IPIN: the driven bus value
+  nIns?: number;          // gates: input count (2-4); bus tools: bit count (1-64)
+  bits?: number;          // IPIN/OPIN/VAL: pin bus width; gates: bitwise operand width (1-64)
+  val?: number | string;  // VAL / multi-bit IPIN: the driven bus value (string beyond 2⁵³)
   w?: number; h?: number; // chips: user-resized body, grid multiples
   freq?: number;          // CLK: full cycles per second
   edge?: EdgeMode;         // gates/chips: update only on this clock edge
   clockPin?: number;       // optional explicit clock input index
-  _ins?: number[];
+  _ins?: bigint[];
 }
 
-/* Mask an integer down to n bits (the value a bus of width n carries). */
-export const maskBits = (v: number | undefined, n: number): number => {
-  const width = clampBits(n);
-  const mod = 2 ** width;
-  const iv = Number.isFinite(v) ? Math.floor(v!) : 0;
-  return ((iv % mod) + mod) % mod;
+/* ── bus values ─────────────────────────────────────────────────────
+   Signals are bigints so 64-bit buses stay exact (JS numbers lose
+   precision at 2⁵³ and native bitwise ops truncate to 32 bits).
+   Comp.val persists as a plain number when it fits, else a decimal
+   string — JSON can't hold bigints. */
+export type BusVal = number | bigint;
+
+export const toBigVal = (v: BusVal | string | undefined | null): bigint => {
+  if (typeof v === 'bigint') return v;
+  if (typeof v === 'number' && Number.isFinite(v)) return BigInt(Math.trunc(v));
+  if (typeof v === 'string') { try { return BigInt(v); } catch { return 0n; } }
+  return 0n;
 };
+
+export const storeVal = (v: bigint): number | string =>
+  v >= 0n && v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v.toString();
+
+/* Mask a value down to n bits (the value a bus of width n carries).
+   Bigint & on negatives follows two's complement, so negative inputs
+   wrap the same way the old modulo arithmetic did. */
+export const maskVal = (v: BusVal | string | undefined, n: number): bigint =>
+  toBigVal(v) & ((1n << BigInt(clampBits(n))) - 1n);
+
+/* Live readout text: full binary up to 4 bits, hex above that. */
+export const formatBusValue = (v: BusVal | undefined, bits: number): string => {
+  const width = clampBits(bits);
+  const b = maskVal(v, width);
+  return width > 4
+    ? '0x' + b.toString(16).toUpperCase().padStart(Math.ceil(width / 4), '0')
+    : b.toString(2).padStart(width, '0');
+};
+/* Character count of formatBusValue's output for an n-bit bus. */
+export const busTextChars = (n: number) => (n > 4 ? 2 + Math.ceil(n / 4) : n);
 
 /* Older saves used directed { from: output pin, to: input pin } wires. */
 export function normalizeWires(list: unknown): Wire[] {
@@ -260,9 +286,9 @@ export const chipOutputBits = (def: ChipDef): number[] =>
   def.outputs.map((_, i) => clampBits(def.outputBits?.[i] ?? 1));
 export type ChipLib = Record<string, ChipDef>;
 export interface SimState {
-  vals: Record<string, number>;
+  vals: Record<string, bigint>;          // 'comp:outIdx' → driven bus value
   sub: Record<string, SimState>;
-  prevIns: Record<string, number[]>;
+  prevIns: Record<string, number[]>;     // 0/1 snapshots for edge detection
 }
 export const newSimState = (): SimState => ({ vals: {}, sub: {}, prevIns: {} });
 
@@ -415,9 +441,11 @@ export function defaultChipLayout(nIn: number, nOut: number, nameLen = 8): ChipL
 const bitRows = (n: number, h: number, x: number): Pin[] =>
   Array.from({ length: n }, (_, i) => ({ x, y: n === 1 ? midRow(h) : snapG(i * (h / (n - 1))) }));
 
-/* Body width for a port (IPIN/OPIN/VAL) that must show an n-bit binary
-   value — grows with bit count, always a grid multiple. */
-export const pinPortW = (n: number) => Math.max(40, Math.ceil((clampBits(n) * 9 + 20) / GRID) * GRID);
+/* Body width for a port (IPIN/OPIN/VAL) that must show its value —
+   binary up to 4 bits, hex beyond. Grows with the text, always a grid
+   multiple. */
+export const pinPortW = (n: number) =>
+  Math.max(40, Math.ceil((busTextChars(clampBits(n)) * 9 + 20) / GRID) * GRID);
 
 export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' | 'h'>, lib: ChipLib): CompGeom {
   if (c.type === 'CHIP') {
@@ -428,17 +456,21 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
 
   if (isGateType(c.type)) {
     const gd = GATE_DEFS[c.type];
-    const base: CompGeom = { name: gd.name, sub: gd.sub, w: gd.w, h: gd.h, ins: gd.ins, outs: gd.outs };
+    // gates can operate bitwise on whole buses — the width rides on the pins
+    const gb = clampBits(c.bits ?? 1);
+    const withGB = (p: Pin): Pin => (gb > 1 ? { ...p, bits: gb } : p);
+    const sub = gb > 1 ? `${gd.sub} · ${gb}-bit` : gd.sub;
+    const base: CompGeom = { name: gd.name, sub, w: gd.w, h: gd.h, ins: gd.ins.map(withGB), outs: gd.outs.map(withGB) };
     if (gd.multiIn) {
       const n = clampGateIns(c.nIns);
       const h = Math.max(40, (n - 1) * GRID);
       const step = h / (n - 1);
       return {
         ...base, h,
-        ins: Array.from({ length: n }, (_, i) => ({ x: -20, y: snapG(i * step) })),
+        ins: Array.from({ length: n }, (_, i) => withGB({ x: -20, y: snapG(i * step) })),
         // even input counts put the body's center between two grid rows —
         // snap the output onto a dot so wires from it can run straight
-        outs: [{ x: 80, y: midRow(h) }],
+        outs: [withGB({ x: 80, y: midRow(h) })],
       };
     }
     return base;
@@ -483,8 +515,7 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
   return PRIM[c.type];
 }
 
-const bit = (v: number | undefined) => (v ? 1 : 0);
-const intVal = (v: number | undefined) => (Number.isFinite(v) ? (v! | 0) : 0);
+const bit = (v: BusVal | undefined) => (v ? 1 : 0);
 const MEMORY_TYPES: ReadonlySet<CompType> = new Set(['SRLATCH', 'DLATCH', 'JKFF', 'DFF', 'SRFF', 'TFF']);
 const EDGE_MEMORY_TYPES: ReadonlySet<CompType> = new Set(['JKFF', 'DFF', 'SRFF', 'TFF']);
 export const isMemoryType = (type: CompType) => MEMORY_TYPES.has(type);
@@ -497,7 +528,7 @@ export const defaultEdgeForComp = (c: Pick<Comp, 'type' | 'edge'>): EdgeMode | u
 
 const defaultMemoryEdge = (c: Comp): EdgeMode => defaultEdgeForComp(c) ?? 'rise';
 
-function memoryTriggered(c: Comp, g: CompGeom, ins: number[], state: SimState, fired: Set<string>): boolean {
+function memoryTriggered(c: Comp, g: CompGeom, ins: bigint[], state: SimState, fired: Set<string>): boolean {
   const pin = clockPinIndex(c, g);
   if (pin < 0) return false;
   const prev = (state.prevIns ??= {})[c.id]?.[pin];
@@ -515,7 +546,7 @@ function memoryOut(q: number, invalid = false): number[] {
   return invalid ? [0, 0] : [v, v ? 0 : 1];
 }
 
-function evalMemory(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFired: Set<string>): number[] {
+function evalMemory(c: Comp, g: CompGeom, ins: bigint[], state: SimState, edgeFired: Set<string>): number[] {
   let q = bit(state.vals[c.id + ':0']);
 
   switch (c.type) {
@@ -562,12 +593,27 @@ function evalMemory(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFi
   }
 }
 
-function evalPrim(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFired: Set<string>, now: number): number[] {
+/* A gate applied bit-position-wise across n-bit input buses — each
+   output bit is the gate's own 1-bit truth function over that bit
+   position of every input, so every registered gate (and any future
+   one) gets bitwise bus behavior for free. */
+function evalGateBus(type: GateType, ins: bigint[], width: number): bigint {
+  const gd = GATE_DEFS[type];
+  let out = 0n;
+  for (let j = 0; j < width; j++) {
+    const sh = BigInt(j);
+    if (gd.eval(ins.map(v => Number((v >> sh) & 1n)))) out |= 1n << sh;
+  }
+  return out;
+}
+
+function evalPrim(c: Comp, g: CompGeom, ins: bigint[], state: SimState, edgeFired: Set<string>, now: number): BusVal[] {
   if (isGateType(c.type)) {
-    // Primitive gates are 1-bit logic devices.
-    // This prevents bus values from accidentally becoming multi-bit gate outputs.
-    const gateIns = ins.map(bit);
-    return [bit(GATE_DEFS[c.type].eval(gateIns))];
+    // Gates are bitwise devices: width 1 (the default) is classic 1-bit
+    // logic; wider gates apply the same truth function per bit position.
+    const n = clampBits(c.bits ?? 1);
+    if (n === 1) return [bit(GATE_DEFS[c.type].eval(ins.map(bit)))];
+    return [evalGateBus(c.type, ins, n)];
   }
 
   if (isMemoryType(c.type)) return evalMemory(c, g, ins, state, edgeFired);
@@ -579,11 +625,11 @@ function evalPrim(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFire
     case 'IPIN': {
       // 1-bit pins toggle (c.on); wider pins drive a typed bus value.
       const n = clampBits(c.bits ?? 1);
-      return [n > 1 ? maskBits(c.val, n) : (c.on ? 1 : 0)];
+      return [n > 1 ? maskVal(c.val, n) : (c.on ? 1 : 0)];
     }
 
     case 'VAL':
-      return [maskBits(c.val, clampBits(c.bits ?? 1))];
+      return [maskVal(c.val, clampBits(c.bits ?? 1))];
 
     case 'BTN':
       return [c.pressed ? 1 : 0];
@@ -598,15 +644,15 @@ function evalPrim(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFire
 
     case 'COMB': {
       // first pin is the MSB
-      let v = 0;
-      for (const b of ins) v = v * 2 + bit(b);
+      let v = 0n;
+      for (const b of ins) v = (v << 1n) | BigInt(bit(b));
       return [v];
     }
 
     case 'SPLIT': {
       const n = g.outs.length;
-      const v = Math.max(0, Math.floor(ins[0] ?? 0));
-      return Array.from({ length: n }, (_, i) => Math.floor(v / (2 ** (n - 1 - i))) % 2);
+      const v = toBigVal(ins[0]);
+      return Array.from({ length: n }, (_, i) => Number((v >> BigInt(n - 1 - i)) & 1n));
     }
 
     default:
@@ -615,8 +661,8 @@ function evalPrim(c: Comp, g: CompGeom, ins: number[], state: SimState, edgeFire
 }
 
 const orOverKeys = (state: SimState, keys?: string[]) => {
-  let v = 0;
-  if (keys) for (const k of keys) v |= state.vals[k] | 0;
+  let v = 0n;
+  if (keys) for (const k of keys) v |= state.vals[k] ?? 0n;
   return v;
 };
 
@@ -633,11 +679,11 @@ function clockPinIndex(c: Comp, g: CompGeom): number {
   return named >= 0 ? named : g.ins.length - 1;
 }
 
-function heldOutputs(c: Comp, g: CompGeom, state: SimState): number[] {
-  return g.outs.map((_, i) => state.vals[c.id + ':' + i] | 0);
+function heldOutputs(c: Comp, g: CompGeom, state: SimState): bigint[] {
+  return g.outs.map((_, i) => state.vals[c.id + ':' + i] ?? 0n);
 }
 
-function edgeAllowsUpdate(c: Comp, g: CompGeom, ins: number[], state: SimState, fired: Set<string>): boolean | null {
+function edgeAllowsUpdate(c: Comp, g: CompGeom, ins: bigint[], state: SimState, fired: Set<string>): boolean | null {
   if (!hasEdge(c)) return null;
   const pin = clockPinIndex(c, g);
   if (pin < 0) return null;
@@ -683,8 +729,8 @@ function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipL
   };
   const setVal = (id: string, v: number) => {
     const k = outKey(id);
-    const n = bit(v);
-    if ((state.vals[k] | 0) !== n) {
+    const n = BigInt(bit(v));
+    if ((state.vals[k] ?? 0n) !== n) {
       state.vals[k] = n;
       changed = true;
     }
@@ -759,7 +805,7 @@ export function evaluateNet(
   wires: Wire[],
   state: SimState,
   lib: ChipLib,
-  boundIns?: Map<string, number>,
+  boundIns?: Map<string, bigint>,
   depth = 0,
   now = Date.now(),
 ): void {
@@ -784,14 +830,14 @@ export function evaluateNet(
   const edgeFired = new Set<string>();
 
   for (let k = 0; k < passes; k++) {
-    const nextVals: Record<string, number> = {};
+    const nextVals: Record<string, bigint> = {};
 
     for (const c of comps) {
       const g = getGeom(c, lib);
       const ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
       c._ins = ins;
 
-      let outs: number[];
+      let outs: BusVal[];
       const edgeUpdate = isMemoryType(c.type) ? null : edgeAllowsUpdate(c, g, ins, state, edgeFired);
 
       if (edgeUpdate === false) {
@@ -803,20 +849,20 @@ export function evaluateNet(
           : [];
       } else if ((c.type === 'IN' || c.type === 'BTN' || c.type === 'IPIN') && boundIns?.has(c.id)) {
         // bound values already masked to the pin's width by evalChip
-        outs = [intVal(boundIns.get(c.id))];
+        outs = [boundIns.get(c.id)!];
       } else {
         outs = evalPrim(c, g, ins, state, edgeFired, now);
       }
 
       for (let i = 0; i < g.outs.length; i++) {
-        nextVals[c.id + ':' + i] = intVal(outs[i]);
+        nextVals[c.id + ':' + i] = toBigVal(outs[i]);
       }
     }
 
     let changed = false;
 
     for (const [key, val] of Object.entries(nextVals)) {
-      if ((state.vals[key] | 0) !== val) {
+      if ((state.vals[key] ?? 0n) !== val) {
         state.vals[key] = val;
         changed = true;
       }
@@ -834,23 +880,23 @@ export function evaluateNet(
 export function evalChip(
   def: ChipDef,
   state: SimState,
-  ins: number[],
+  ins: BusVal[],
   lib: ChipLib,
   depth = 0,
   now = Date.now(),
-): number[] {
+): bigint[] {
   // Legacy chips (no per-pin bits) keep exact 1-bit-in / raw-out behavior;
   // chips saved with the pin-width feature mask to each pin's declared bus.
   const inB = def.inputBits, outB = def.outputBits;
-  const bound = new Map<string, number>();
-  def.inputComps.forEach((id, i) => bound.set(id, inB ? maskBits(ins[i], inB[i]) : bit(ins[i])));
+  const bound = new Map<string, bigint>();
+  def.inputComps.forEach((id, i) => bound.set(id, inB ? maskVal(ins[i], inB[i]) : BigInt(bit(ins[i]))));
 
   evaluateNet(def.comps, def.wires, state, lib, bound, depth, now);
 
   const nets = analyzeNets(def.wires, tunnelPinGroups(def.comps));
   return def.outputComps.map((id, i) => {
     const v = orOverKeys(state, nets.inputDrivers.get(id + ':0'));
-    return outB ? maskBits(v, clampBits(outB[i])) : v;
+    return outB ? maskVal(v, clampBits(outB[i])) : v;
   });
 }
 

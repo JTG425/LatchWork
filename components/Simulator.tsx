@@ -23,9 +23,20 @@ const LS_BOARD = 'latchwork.board.v1';   // legacy single-board key, migrated in
 const LS_CHIPS = 'latchwork.chips.v1';
 const LS_TABS = 'latchwork.tabs.v1';
 const LS_PAL = 'latchwork.palette.v1';   // { collapsed: {head: bool}, width: px }
+const LS_FOLDERS = 'latchwork.folders.v1'; // { [name]: { color?: hex } } — keeps empty folders & colors
 
 const PAL_MIN_W = 120, PAL_MAX_W = 420, PAL_DEF_W = 186;
 const clampPalW = (w: number) => Math.min(PAL_MAX_W, Math.max(PAL_MIN_W, Math.round(w)));
+
+/* Inspector value drafts: binary up to 4 bits, hex (no 0x prefix) beyond. */
+const hexDigits = (bits: number) => Math.ceil(bits / 4);
+const valDraftFor = (v: bigint, bits: number) =>
+  bits > 4 ? v.toString(16).toUpperCase().padStart(hexDigits(bits), '0') : v.toString(2).padStart(bits, '0');
+
+interface FolderMeta { color?: string }
+const FOLDER_COLORS = ['#0a84ff', '#30d158', '#ffd60a', '#ff9f0a', '#ff453a', '#ff375f', '#bf5af2', '#64d2ff'];
+const MAX_FOLDER_NAME = 20;
+const cleanFolderName = (s: string) => s.trim().slice(0, MAX_FOLDER_NAME);
 
 export interface SimUser { id?: string | null; name?: string | null; email?: string | null }
 
@@ -122,6 +133,28 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
   );
 }
 
+/* Small folder glyph used across the palette — takes the folder's color. */
+function FolderIcon({ color, size = 13 }: { color?: string; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true" style={{ flexShrink: 0 }}>
+      <path
+        d="M1.5 12.6 V4.2 A1.7 1.7 0 0 1 3.2 2.5 H6.1 L7.8 4.3 H12.8 A1.7 1.7 0 0 1 14.5 6 V12.6 A1.7 1.7 0 0 1 12.8 14.3 H3.2 A1.7 1.7 0 0 1 1.5 12.6 Z"
+        fill={color ?? 'var(--muted)'}
+        opacity={color ? 1 : 0.75}
+      />
+    </svg>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg className="psico" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M10.5 10.5 L14 14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /* Animated modal shell shared by the Simulator's dialogs. */
 function Modal({ children, onDismiss, className, label }: {
   children: React.ReactNode; onDismiss: () => void; className?: string; label: string;
@@ -181,6 +214,17 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const [peek, setPeek] = useState<{ compId: string; chipId: string } | null>(null);
   const [folderMenu, setFolderMenu] = useState<string | null>(null);
   const [newFolder, setNewFolder] = useState('');
+  const [query, setQuery] = useState('');
+  const [folderMeta, setFolderMetaState] = useState<Record<string, FolderMeta>>({});
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [folderDraft, setFolderDraft] = useState('');
+  const [renamingFolder, setRenamingFolder] = useState<string | null>(null);
+  const [folderRenameDraft, setFolderRenameDraft] = useState('');
+  const [colorMenu, setColorMenu] = useState<string | null>(null);
+  const [drag, setDrag] = useState<{ chip: ChipDef; x: number; y: number } | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null); // folder name, '' = out of folders
+  const folderMetaRef = useRef<Record<string, FolderMeta>>({});
+  const searchRef = useRef<HTMLInputElement>(null);
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTab, setActiveTab] = useState('');
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -335,7 +379,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         setSel(info);
         setLabelDraft(info?.label ?? '');
         setFreqDraft(info?.freq != null ? String(info.freq) : '');
-        setValDraft(info?.val != null ? info.val.toString(2).padStart(info.pinBits ?? 1, '0') : '');
+        setValDraft(info?.val != null ? valDraftFor(info.val, info.pinBits ?? 1) : '');
       },
       onCounts: setCounts,
       onZoom: setZoom,
@@ -356,6 +400,10 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       const p = JSON.parse(localStorage.getItem(LS_PAL) || 'null');
       if (p && typeof p.width === 'number') { palWidthRef.current = clampPalW(p.width); setPalWidth(palWidthRef.current); }
       if (p && p.collapsed && typeof p.collapsed === 'object') { collapsedRef.current = p.collapsed; setCollapsed(p.collapsed); }
+    } catch {}
+    try {
+      const f = JSON.parse(localStorage.getItem(LS_FOLDERS) || 'null');
+      if (f && typeof f === 'object' && !Array.isArray(f)) { folderMetaRef.current = f; setFolderMetaState(f); }
     } catch {}
 
     let local: ChipDef[] = [];
@@ -404,6 +452,33 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     return () => ed.destroy();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* "/" jumps to the palette search from anywhere outside a text field. */
+  useEffect(() => {
+    const onSlash = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+      if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', onSlash);
+    return () => window.removeEventListener('keydown', onSlash);
+  }, []);
+
+  /* Palette popovers (move-to-folder, folder color) close on outside click. */
+  useEffect(() => {
+    if (folderMenu == null && colorMenu == null) return;
+    const close = (e: PointerEvent) => {
+      if ((e.target as HTMLElement).closest('.folderpop,.colorpop,.chipfolder,.fact-color')) return;
+      setFolderMenu(null);
+      setColorMenu(null);
+    };
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [folderMenu, colorMenu]);
 
   /* ── actions ── */
   const activeMeta = tabs.find(t => t.id === activeTab);
@@ -510,15 +585,23 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     notify(`Added “${defs[0].name}” to My chips${fresh.length > 1 ? ` (+${fresh.length - 1} nested chip${fresh.length > 2 ? 's' : ''})` : ''}.`);
   };
 
-  /* ── folders ── */
+  /* ── folders ──
+     A folder exists if any chip points at it OR it has a metadata entry
+     (so empty folders and colors survive). Metadata lives in localStorage. */
   const folders = useMemo(() => {
-    const s = new Set<string>();
+    const s = new Set<string>(Object.keys(folderMeta));
     for (const c of chips) if (c.folder) s.add(c.folder);
     return [...s].sort((a, b) => a.localeCompare(b));
-  }, [chips]);
+  }, [chips, folderMeta]);
+
+  const setFolderMeta = (meta: Record<string, FolderMeta>) => {
+    folderMetaRef.current = meta;
+    setFolderMetaState(meta);
+    try { localStorage.setItem(LS_FOLDERS, JSON.stringify(meta)); } catch {}
+  };
 
   const setChipFolder = (id: string, folder?: string) => {
-    const name = folder?.trim().slice(0, 20);
+    const name = folder && cleanFolderName(folder);
     setChips(chips.map(c => {
       if (c.id !== id) return c;
       const { folder: _f, ...rest } = c;
@@ -526,6 +609,100 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     }));
     setFolderMenu(null);
     setNewFolder('');
+  };
+
+  const createFolder = (raw: string) => {
+    const name = cleanFolderName(raw);
+    setCreatingFolder(false);
+    setFolderDraft('');
+    if (!name) return;
+    if (folders.includes(name)) { notify(`A folder called “${name}” already exists.`); return; }
+    setFolderMeta({ ...folderMetaRef.current, [name]: {} });
+    collapsedRef.current = { ...collapsedRef.current, 'My chips': false, ['folder:' + name]: false };
+    setCollapsed(collapsedRef.current);
+    persistPal();
+  };
+
+  const renameFolder = (from: string, to: string) => {
+    const name = cleanFolderName(to);
+    setRenamingFolder(null);
+    if (!name || name === from) return;
+    if (folders.includes(name)) { notify(`A folder called “${name}” already exists.`); return; }
+    const meta = { ...folderMetaRef.current, [name]: folderMetaRef.current[from] ?? {} };
+    delete meta[from];
+    setFolderMeta(meta);
+    collapsedRef.current = { ...collapsedRef.current, ['folder:' + name]: collapsedRef.current['folder:' + from] ?? false };
+    setCollapsed(collapsedRef.current);
+    persistPal();
+    if (chips.some(c => c.folder === from)) {
+      setChips(chips.map(c => (c.folder === from ? { ...c, folder: name } : c)));
+    }
+  };
+
+  const deleteFolder = (f: string) => {
+    const meta = { ...folderMetaRef.current };
+    delete meta[f];
+    setFolderMeta(meta);
+    setColorMenu(null);
+    const n = chips.filter(c => c.folder === f).length;
+    if (n) {
+      setChips(chips.map(c => {
+        if (c.folder !== f) return c;
+        const { folder: _x, ...rest } = c;
+        return rest;
+      }));
+    }
+    notify(n ? `Removed “${f}” — ${n} chip${n > 1 ? 's' : ''} moved back to My chips.` : `Removed folder “${f}”.`);
+  };
+
+  const setFolderColor = (f: string, color?: string) => {
+    const cur = { ...(folderMetaRef.current[f] ?? {}) };
+    if (color) cur.color = color; else delete cur.color;
+    setFolderMeta({ ...folderMetaRef.current, [f]: cur });
+  };
+
+  /* Drop a dragged chip on a folder (or on '' = back to the loose list). */
+  const dropChipToFolder = (def: ChipDef, target: string) => {
+    if ((chipsRef.current[def.id]?.folder ?? '') === target) return;
+    setChipFolder(def.id, target || undefined);
+    notify(target ? `Moved “${def.name}” into “${target}”.` : `Moved “${def.name}” out of its folder.`);
+  };
+
+  /* Chip rows: a short press stamps copies (as before); dragging past a
+     small threshold picks the chip up so it can be dropped on a folder. */
+  const chipDragStart = (def: ChipDef) => (e: React.PointerEvent) => {
+    if ((e.target as HTMLElement).closest('.chip-actions,.folderpop')) return;
+    e.preventDefault();
+    setFolderMenu(null);
+    const startX = e.clientX, startY = e.clientY;
+    let dragging = false;
+    const targetAt = (x: number, y: number) => {
+      const el = document.elementFromPoint(x, y)?.closest('[data-drop]') as HTMLElement | null;
+      return el ? (el.dataset.drop ?? null) : null;
+    };
+    const move = (ev: PointerEvent) => {
+      if (!dragging && Math.hypot(ev.clientX - startX, ev.clientY - startY) > 6) dragging = true;
+      if (dragging) {
+        setDrag({ chip: def, x: ev.clientX, y: ev.clientY });
+        setDropTarget(targetAt(ev.clientX, ev.clientY));
+      }
+    };
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if (dragging) {
+        const t = ev.type === 'pointerup' ? targetAt(ev.clientX, ev.clientY) : null;
+        if (t != null) dropChipToFolder(def, t);
+        setDrag(null);
+        setDropTarget(null);
+      } else if (ev.type === 'pointerup') {
+        placeChip(def);
+      }
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   };
 
   const onLabelChange = (v: string) => {
@@ -540,9 +717,17 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   };
 
   const onValueChange = (v: string) => {
-    const clean = v.replace(/[^01]/g, '').slice(0, sel?.pinBits ?? 1);
-    setValDraft(clean);
-    if (sel) apiRef.current!.setValue(sel.id, clean ? parseInt(clean, 2) : 0);
+    const bits = sel?.pinBits ?? 1;
+    if (bits > 4) {
+      // wide buses take hex — a 64-bit binary string is unreadable
+      const clean = v.replace(/[^0-9a-fA-F]/g, '').toUpperCase().slice(0, hexDigits(bits));
+      setValDraft(clean);
+      if (sel) apiRef.current!.setValue(sel.id, clean ? BigInt('0x' + clean) : 0n);
+    } else {
+      const clean = v.replace(/[^01]/g, '').slice(0, bits);
+      setValDraft(clean);
+      if (sel) apiRef.current!.setValue(sel.id, clean ? BigInt('0b' + clean) : 0n);
+    }
   };
 
   const onPinBitsChange = (n: number) => {
@@ -571,29 +756,63 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     : sel?.kind === 'wire' ? 'select a width to make it a bus'
     : sel?.kind === 'multi' ? 'drag to move together' : '';
 
+  /* ── palette search ── */
+  const q = query.trim().toLowerCase();
+  const qMatch = (s?: string) => !!s && s.toLowerCase().includes(q);
+
+  /* Highlight the matched part of a name while searching. */
+  const hiName = (s: string): React.ReactNode => {
+    if (!q) return s;
+    const i = s.toLowerCase().indexOf(q);
+    if (i < 0) return s;
+    return <>{s.slice(0, i)}<mark>{s.slice(i, i + q.length)}</mark>{s.slice(i + q.length)}</>;
+  };
+
+  const builtinGroups = PALETTE_ORDER.map(([head, types]) => {
+    const shown = !q ? types : types.filter(t => {
+      const g = getGeom({ type: t }, {});
+      return qMatch(g.name) || qMatch(g.sub) || qMatch(t) || qMatch(head);
+    });
+    return { head, shown };
+  }).filter(g => g.shown.length > 0);
+
+  const chipMatches = (c: ChipDef) => !q || qMatch(c.name);
+  const folderView = folders.map(f => {
+    const all = chips.filter(c => c.folder === f);
+    const shown = !q || qMatch(f) ? all : all.filter(chipMatches);
+    return { name: f, all, shown, visible: !q || qMatch(f) || shown.length > 0 };
+  });
+  const looseShown = chips.filter(c => !c.folder && chipMatches(c));
+  const myChipsVisible = !q || looseShown.length > 0 || folderView.some(v => v.visible);
+  const noResults = q.length > 0 && builtinGroups.length === 0 && !myChipsVisible;
+
   /* One chip row in the palette (used by folders and the loose list). */
   const chipRow = (def: ChipDef) => (
-    <div key={def.id} className={'pal-item chip' + (armed?.chipId === def.id ? ' armed' : '')}
-      title="Click to stamp copies on the grid — double-click to edit the internals"
-      onPointerDown={e => {
-        if ((e.target as HTMLElement).closest('.chipdel,.chipinfo,.chipfolder,.folderpop')) return;
-        e.preventDefault(); placeChip(def);
-      }}
+    <div key={def.id}
+      className={'pal-item chip' + (armed?.chipId === def.id ? ' armed' : '') + (drag?.chip.id === def.id ? ' dragging' : '')}
+      role="button" tabIndex={0}
+      title="Click to stamp copies on the grid — drag onto a folder to organize, double-click to edit the internals"
+      onPointerDown={chipDragStart(def)}
+      onKeyDown={e => { if (e.key === 'Enter') placeChip(def); }}
       onDoubleClick={e => {
-        if ((e.target as HTMLElement).closest('.chipdel,.chipinfo,.chipfolder,.folderpop')) return;
+        if ((e.target as HTMLElement).closest('.chip-actions,.folderpop')) return;
         askEditChip(def.id);
       }}>
       <PalIcon type="CHIP" chip={def} />
-      <div style={{ minWidth: 0 }}>
-        <div className="nm ellip">{def.name}</div>
+      <div className="chipmeta">
+        <div className="nm ellip">{hiName(def.name)}</div>
         <div className="sub">{def.inputs.length} in · {def.outputs.length} out</div>
       </div>
-      <button className="chipfolder" aria-label={`Move ${def.name} to a folder`} title="Move to folder"
-        onClick={() => { setFolderMenu(folderMenu === def.id ? null : def.id); setNewFolder(''); }}>▣</button>
-      <button className="chipinfo" aria-label={`Inspect ${def.name} — truth table and state machine`}
-        title="Truth table, state machine & package" onClick={() => setInspect(def)}>i</button>
-      <button className="chipdel" aria-label={`Delete ${def.name}`} title="Delete chip"
-        onClick={() => requestDeleteChip(def)}>×</button>
+      <div className="chip-actions">
+        <button className="chipfolder" aria-label={`Move ${def.name} to a folder`} title="Move to folder"
+          onClick={() => { setFolderMenu(folderMenu === def.id ? null : def.id); setNewFolder(''); }}>
+          <FolderIcon size={10} />
+        </button>
+        <button className="chipinfo" aria-label={`Inspect ${def.name} — truth table and state machine`}
+          title="Truth table, state machine & package" onClick={() => setInspect(def)}>i</button>
+        <button className="chipdel" aria-label={`Delete ${def.name}`} title="Delete chip"
+          onClick={() => requestDeleteChip(def)}>×</button>
+      </div>
       <AnimatePresence>
         {folderMenu === def.id && (
           <motion.div className="folderpop" onPointerDown={e => e.stopPropagation()}
@@ -603,7 +822,8 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
             {folders.map(f => (
               <button key={f} className={'folderpop-item' + (def.folder === f ? ' on' : '')}
                 onClick={() => setChipFolder(def.id, def.folder === f ? undefined : f)}>
-                <span aria-hidden="true">▣</span>{f}{def.folder === f ? ' ✓' : ''}
+                <FolderIcon size={11} color={folderMeta[f]?.color} />
+                <span className="ellip">{f}</span>{def.folder === f ? ' ✓' : ''}
               </button>
             ))}
             {def.folder && (
@@ -614,7 +834,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
             <div className="folderpop-new">
               <input
                 value={newFolder}
-                maxLength={20}
+                maxLength={MAX_FOLDER_NAME}
                 placeholder="New folder…"
                 onChange={e => setNewFolder(e.target.value)}
                 onKeyDown={e => {
@@ -629,8 +849,6 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       </AnimatePresence>
     </div>
   );
-
-  const looseChips = chips.filter(c => !c.folder);
 
   /* Collapsible palette-group body with a subtle height animation. */
   const groupBody = (open: boolean, children: React.ReactNode) => (
@@ -652,7 +870,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
 
   /* ── render ── */
   return (
-    <div id="app">
+    <div id="app" className={drag ? 'dragging' : ''}>
       <div id="titlebar">
         <div id="appname"><LogoMark size={22} />Latchwork<em>digital logic workbench</em></div>
         <div id="titletools">
@@ -684,60 +902,180 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       </div>
 
       <div id="main">
-        <nav id="palette" aria-label="Component palette" style={{ width: palWidth }}>
-          {PALETTE_ORDER.map(([head, types]) => (
-            <div key={head} className="pal-group">
-              <button className={'pal-head' + (collapsed[head] ? ' closed' : '')}
-                aria-expanded={!collapsed[head]} onClick={() => toggleGroup(head)}>
-                <span className="chev" aria-hidden="true">▾</span>{head}
-              </button>
-              {groupBody(!collapsed[head], types.map(t => {
-                const g = getGeom({ type: t }, {});
-                const isArmed = armed?.type === t && !armed?.chipId;
-                return (
-                  <div key={t} className={'pal-item' + (isArmed ? ' armed' : '')}
-                    title="Click, then stamp copies on the grid — esc stops"
-                    onPointerDown={e => { e.preventDefault(); api().beginPlace(t); }}>
-                    <PalIcon type={t} />
-                    <div><div className="nm">{g.name}</div><div className="sub">{g.sub}</div></div>
-                  </div>
-                );
-              }))}
-            </div>
-          ))}
+        <nav id="palette" aria-label="Component palette" style={{ width: palWidth }}
+          className={drag ? 'dragging-chip' : ''}>
+          <div id="palsearch">
+            <SearchIcon />
+            <input
+              ref={searchRef}
+              value={query}
+              placeholder="Search components"
+              aria-label="Search components and chips"
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Escape') { setQuery(''); (e.target as HTMLElement).blur(); }
+              }}
+            />
+            {query
+              ? <button className="psclear" aria-label="Clear search"
+                  onClick={() => { setQuery(''); searchRef.current?.focus(); }}>×</button>
+              : <kbd className="pskbd" aria-hidden="true">/</kbd>}
+          </div>
 
-          <div className="pal-group">
-            <button className={'pal-head' + (collapsed['My chips'] ? ' closed' : '')}
-              aria-expanded={!collapsed['My chips']} onClick={() => toggleGroup('My chips')}>
-              <span className="chev" aria-hidden="true">▾</span>My chips
-            </button>
-            {groupBody(!collapsed['My chips'], (
-              <>
-                {chips.length === 0 && (
-                  <div className="pal-empty">
-                    Build a circuit with <b>Input</b> and <b>Output pins</b>, then <b>Save as chip</b> to package it
-                    here — like a D flip-flop you can reuse anywhere.
-                  </div>
-                )}
-                {folders.map(f => {
-                  const inFolder = chips.filter(c => c.folder === f);
-                  const key = 'folder:' + f;
+          <div id="palscroll">
+            {builtinGroups.map(({ head, shown }) => (
+              <div key={head} className="pal-group">
+                <button className={'pal-head' + (!q && collapsed[head] ? ' closed' : '')}
+                  aria-expanded={q ? true : !collapsed[head]} onClick={() => toggleGroup(head)}>
+                  <span className="chev" aria-hidden="true">▾</span>{head}
+                </button>
+                {groupBody(q ? true : !collapsed[head], shown.map(t => {
+                  const g = getGeom({ type: t }, {});
+                  const isArmed = armed?.type === t && !armed?.chipId;
                   return (
-                    <div key={key} className="pal-folder">
-                      <button className={'pal-subhead' + (collapsed[key] ? ' closed' : '')}
-                        aria-expanded={!collapsed[key]} onClick={() => toggleGroup(key)}>
-                        <span className="chev" aria-hidden="true">▾</span>
-                        <span className="fico" aria-hidden="true">▣</span>
-                        <span className="ellip">{f}</span>
-                        <span className="fcount mono">{inFolder.length}</span>
-                      </button>
-                      {groupBody(!collapsed[key], inFolder.map(chipRow))}
+                    <div key={t} className={'pal-item' + (isArmed ? ' armed' : '')}
+                      role="button" tabIndex={0}
+                      title="Click, then stamp copies on the grid — esc stops"
+                      onPointerDown={e => { e.preventDefault(); api().beginPlace(t); }}
+                      onKeyDown={e => { if (e.key === 'Enter') api().beginPlace(t); }}>
+                      <PalIcon type={t} />
+                      <div><div className="nm">{hiName(g.name)}</div><div className="sub">{g.sub}</div></div>
                     </div>
                   );
-                })}
-                {looseChips.map(chipRow)}
-              </>
+                }))}
+              </div>
             ))}
+
+            {myChipsVisible && (
+              <div className={'pal-group' + (drag && dropTarget === '' ? ' dragover-loose' : '')} data-drop="">
+                <div className="pal-head-row">
+                  <button className={'pal-head' + (!q && collapsed['My chips'] ? ' closed' : '')}
+                    aria-expanded={q ? true : !collapsed['My chips']} onClick={() => toggleGroup('My chips')}>
+                    <span className="chev" aria-hidden="true">▾</span>My chips
+                    {chips.length > 0 && <span className="fcount mono">{chips.length}</span>}
+                  </button>
+                  <button className="pal-newfolder" title="New folder" aria-label="Create a folder"
+                    onClick={() => {
+                      setCreatingFolder(true);
+                      setFolderDraft('');
+                      if (collapsedRef.current['My chips']) toggleGroup('My chips');
+                    }}>
+                    <FolderIcon size={12} /><span aria-hidden="true">+</span>
+                  </button>
+                </div>
+                {groupBody(q ? true : !collapsed['My chips'], (
+                  <>
+                    {creatingFolder && (
+                      <div className="pal-newfolder-row">
+                        <FolderIcon size={12} />
+                        <input
+                          autoFocus
+                          value={folderDraft}
+                          maxLength={MAX_FOLDER_NAME}
+                          placeholder="Folder name…"
+                          onChange={e => setFolderDraft(e.target.value)}
+                          onBlur={() => createFolder(folderDraft)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') createFolder(folderDraft);
+                            if (e.key === 'Escape') { setCreatingFolder(false); setFolderDraft(''); }
+                          }}
+                        />
+                      </div>
+                    )}
+                    {chips.length === 0 && folders.length === 0 && !q && (
+                      <div className="pal-empty">
+                        Build a circuit with <b>Input</b> and <b>Output pins</b>, then <b>Save as chip</b> to package it
+                        here — like a D flip-flop you can reuse anywhere.
+                      </div>
+                    )}
+                    {folderView.filter(v => v.visible).map(({ name: f, all, shown }) => {
+                      const key = 'folder:' + f;
+                      const color = folderMeta[f]?.color;
+                      const open = q ? true : !collapsed[key];
+                      return (
+                        <div key={key}
+                          className={'pal-folder' + (drag && dropTarget === f ? ' dragover' : '')}
+                          data-drop={f}
+                          style={color ? { borderLeftColor: color } : undefined}>
+                          <div className="pal-subhead-row">
+                            {renamingFolder === f ? (
+                              <div className="pal-subhead renamer">
+                                <FolderIcon color={color} />
+                                <input
+                                  autoFocus
+                                  value={folderRenameDraft}
+                                  maxLength={MAX_FOLDER_NAME}
+                                  aria-label={`Rename folder ${f}`}
+                                  onChange={e => setFolderRenameDraft(e.target.value)}
+                                  onBlur={() => renameFolder(f, folderRenameDraft)}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter') renameFolder(f, folderRenameDraft);
+                                    if (e.key === 'Escape') setRenamingFolder(null);
+                                  }}
+                                />
+                              </div>
+                            ) : (
+                              <button className={'pal-subhead' + (!q && collapsed[key] ? ' closed' : '')}
+                                aria-expanded={open} onClick={() => toggleGroup(key)}
+                                onDoubleClick={() => { setRenamingFolder(f); setFolderRenameDraft(f); }}
+                                title="Click to collapse — double-click to rename">
+                                <span className="chev" aria-hidden="true">▾</span>
+                                <FolderIcon color={color} />
+                                <span className="ellip">{hiName(f)}</span>
+                                <span className="fcount mono"
+                                  style={color ? { background: color + '2e', color } : undefined}>
+                                  {q && shown.length !== all.length ? `${shown.length}/${all.length}` : all.length}
+                                </span>
+                              </button>
+                            )}
+                            <div className="folder-actions">
+                              <button className="fact fact-color" title="Folder color"
+                                aria-label={`Set color of ${f}`}
+                                onClick={() => setColorMenu(colorMenu === f ? null : f)}>
+                                <span className="dot" style={{ background: color ?? 'var(--muted)' }} />
+                              </button>
+                              <button className="fact" title="Rename folder" aria-label={`Rename ${f}`}
+                                onClick={() => { setRenamingFolder(f); setFolderRenameDraft(f); }}>✎</button>
+                              <button className="fact fact-del" title="Remove folder — its chips stay in My chips"
+                                aria-label={`Remove folder ${f}`} onClick={() => deleteFolder(f)}>×</button>
+                            </div>
+                            <AnimatePresence>
+                              {colorMenu === f && (
+                                <motion.div className="colorpop" onPointerDown={e => e.stopPropagation()}
+                                  initial={{ opacity: 0, y: -4, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }}
+                                  exit={{ opacity: 0, y: -4, scale: 0.98 }} transition={{ duration: 0.14 }}>
+                                  {FOLDER_COLORS.map(c => (
+                                    <button key={c} className={'swatch' + (color === c ? ' on' : '')}
+                                      style={{ background: c }} aria-label={`Color ${c}`}
+                                      onClick={() => { setFolderColor(f, c); setColorMenu(null); }} />
+                                  ))}
+                                  <button className="swatch none" title="No color" aria-label="No color"
+                                    onClick={() => { setFolderColor(f, undefined); setColorMenu(null); }}>×</button>
+                                </motion.div>
+                              )}
+                            </AnimatePresence>
+                          </div>
+                          {groupBody(open, (
+                            <>
+                              {shown.map(chipRow)}
+                              {all.length === 0 && <div className="pal-folderempty">Drag chips here</div>}
+                            </>
+                          ))}
+                        </div>
+                      );
+                    })}
+                    {looseShown.map(chipRow)}
+                  </>
+                ))}
+              </div>
+            )}
+
+            {noResults && (
+              <div className="pal-noresults">
+                Nothing matches “<b>{query.trim()}</b>”.
+                <button className="linkbtn" onClick={() => { setQuery(''); searchRef.current?.focus(); }}>Clear search</button>
+              </div>
+            )}
           </div>
         </nav>
         <div id="palresize" role="separator" aria-orientation="vertical" aria-label="Resize palette"
@@ -842,7 +1180,10 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                 )}
 
                 {sel.kind === 'comp' && sel.pinBits != null && (
-                  <label className="side-field" title="Pin bus width — how many bits this pin carries">
+                  <label className="side-field"
+                    title={sel.type && isGateType(sel.type)
+                      ? `Operand width — the gate applies its logic bitwise across buses up to ${MAX_WIRE_BITS} bits`
+                      : 'Pin bus width — how many bits this pin carries'}>
                     <span>Bits</span>
                     <input
                       className="mono"
@@ -851,25 +1192,31 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                       max={MAX_WIRE_BITS}
                       step={1}
                       value={sel.pinBits}
-                      aria-label="Pin bus width"
+                      aria-label={sel.type && isGateType(sel.type) ? 'Gate operand width' : 'Pin bus width'}
                       onChange={e => onPinBitsChange(e.target.valueAsNumber)}
                     />
                   </label>
                 )}
 
                 {sel.kind === 'comp' && sel.val != null && (
-                  <label className="side-field" title="Binary value driven onto the bus (MSB first)">
-                    <span>Value</span>
-                    <input
-                      className="mono"
-                      type="text"
-                      inputMode="numeric"
-                      value={valDraft}
-                      placeholder="0"
-                      maxLength={sel.pinBits ?? 1}
-                      aria-label="Binary value"
-                      onChange={e => onValueChange(e.target.value)}
-                    />
+                  <label className="side-field"
+                    title={(sel.pinBits ?? 1) > 4
+                      ? 'Hex value driven onto the bus'
+                      : 'Binary value driven onto the bus (MSB first)'}>
+                    <span>Value{(sel.pinBits ?? 1) > 4 ? ' · hex' : ' · binary'}</span>
+                    <div className={'side-valwrap' + ((sel.pinBits ?? 1) > 4 ? ' hex' : '')}>
+                      {(sel.pinBits ?? 1) > 4 && <span className="valprefix mono" aria-hidden="true">0x</span>}
+                      <input
+                        className="mono"
+                        type="text"
+                        inputMode={(sel.pinBits ?? 1) > 4 ? 'text' : 'numeric'}
+                        value={valDraft}
+                        placeholder="0"
+                        maxLength={(sel.pinBits ?? 1) > 4 ? hexDigits(sel.pinBits ?? 1) : (sel.pinBits ?? 1)}
+                        aria-label={(sel.pinBits ?? 1) > 4 ? 'Hex value' : 'Binary value'}
+                        onChange={e => onValueChange(e.target.value)}
+                      />
+                    </div>
                   </label>
                 )}
 
@@ -999,6 +1346,20 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         <span><kbd>⌫</kbd> delete · <kbd>esc</kbd> cancel · scroll to pan · <kbd>ctrl</kbd>+scroll to zoom · <kbd>space</kbd>+drag or middle-drag to pan</span>
         <span>{user ? 'Chips sync to your account' : auth ? 'Chips save to this browser — sign in to sync' : 'Chips save to this browser'}</span>
       </div>
+
+      {drag && (
+        <div className="dragghost" style={{ transform: `translate(${drag.x + 14}px, ${drag.y + 10}px)` }}>
+          <PalIcon type="CHIP" chip={drag.chip} />
+          <div className="dragghost-meta">
+            <span className="ellip">{drag.chip.name}</span>
+            <em>{dropTarget == null
+              ? 'Drop on a folder'
+              : dropTarget === ''
+                ? ((drag.chip.folder ?? '') === '' ? 'My chips' : 'Move out of folder')
+                : `Move to “${dropTarget}”`}</em>
+          </div>
+        </div>
+      )}
 
       {authOpen && auth && <AuthDialog auth={auth} onClose={() => setAuthOpen(false)} />}
 
