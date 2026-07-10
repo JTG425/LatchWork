@@ -5,7 +5,7 @@
    the chip inspector dialog and the community storefront. */
 
 import { useMemo, useState } from 'react';
-import { ChipDef, ChipLib } from '@/lib/engine';
+import { ChipDef, ChipLib, chipOutputBits, formatBusValue } from '@/lib/engine';
 import { analyzeChip, comboLabel, MAX_TT_INPUTS, MAX_FSM_INPUTS, FsmEdge } from '@/lib/analyze';
 import { chipAbstractSVG, chipInternalsSVG } from '@/lib/chip-svg';
 
@@ -44,7 +44,7 @@ function StateDiagram({ states, edges, nIn }: { states: number; edges: FsmEdge[]
     return { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
   };
   const label = (e: FsmEdge) =>
-    e.combos.map(c => comboLabel(c, nIn)).join(',') + ' / ' + e.outs.join('');
+    e.combos.map(c => comboLabel(c, nIn)).join(',') + ' / ' + e.outs.map(String).join('');
 
   // parallel edges between the same pair bow at increasing offsets
   const pairCount = new Map<string, number>();
@@ -116,6 +116,7 @@ export default function ChipAnalysis({ def, lib }: { def: ChipDef; lib: ChipLib 
   const a = useMemo(() => {
     try { return analyzeChip(def, lib); } catch { return null; }
   }, [def, lib]);
+  const outBits = useMemo(() => chipOutputBits(def), [def]);
 
   if (!a) return <p className="analysis-note">Couldn&apos;t analyze this chip — its definition may reference chips that aren&apos;t available.</p>;
 
@@ -145,7 +146,7 @@ export default function ChipAnalysis({ def, lib }: { def: ChipDef; lib: ChipLib 
                 <tr key={r}>
                   {row.ins.map((v, i) => <td key={'i' + i}>{v}</td>)}
                   <td className="ttsep" aria-hidden="true" />
-                  {row.outs.map((v, i) => <td key={'o' + i} className={v ? 'hi' : ''}>{v}</td>)}
+                  {row.outs.map((v, i) => <td key={'o' + i} className={v ? 'hi' : ''}>{formatBusValue(v, outBits[i] ?? 1)}</td>)}
                 </tr>
               ))}
             </tbody>

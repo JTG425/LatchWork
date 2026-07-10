@@ -16,13 +16,13 @@ export const MAX_TT_INPUTS = 8;   // 256 rows — beyond this the table is skipp
 export const MAX_FSM_INPUTS = 4;  // 16 combos per state keeps exploration + diagram sane
 const RAW_STATE_CAP = 48;         // raw snapshot cap before we call it "too large"
 
-export interface TruthRow { ins: number[]; outs: number[] }
+export interface TruthRow { ins: number[]; outs: bigint[] }
 
 export interface FsmEdge {
   from: number;
   to: number;
   combos: number[];   // input combinations (bit i of combo = input i), grouped
-  outs: number[];     // outputs produced on this transition (Mealy)
+  outs: bigint[];     // outputs produced on this transition (Mealy)
 }
 
 export interface FsmResult {
@@ -54,11 +54,16 @@ export const comboIns = (combo: number, n: number): number[] =>
 export const comboLabel = (combo: number, n: number): string =>
   comboIns(combo, n).join('');
 
-const cloneState = (s: SimState): SimState => JSON.parse(JSON.stringify(s));
+/* Manual deep clone — sim values are bigints, which JSON can't round-trip. */
+const cloneState = (s: SimState): SimState => ({
+  vals: { ...s.vals },
+  sub: Object.fromEntries(Object.entries(s.sub).map(([k, v]) => [k, cloneState(v)])),
+  prevIns: Object.fromEntries(Object.entries(s.prevIns ?? {}).map(([k, v]) => [k, [...v]])),
+});
 
 /* Canonical snapshot key — order-independent over vals and sub trees. */
 function keyOf(s: SimState): string {
-  const vals = Object.keys(s.vals).sort().map(k => `${k}=${s.vals[k] | 0}`).join(',');
+  const vals = Object.keys(s.vals).sort().map(k => `${k}=${s.vals[k] ?? 0n}`).join(',');
   const subs = Object.keys(s.sub).sort().map(k => `${k}{${keyOf(s.sub[k])}}`).join('');
   const prev = Object.keys(s.prevIns ?? {}).sort().map(k => `${k}=[${s.prevIns[k].map(v => v | 0).join('')}]`).join(',');
   return vals + '|' + prev + '|' + subs;
@@ -68,8 +73,8 @@ function keyOf(s: SimState): string {
    changing (each evalChip call already runs many internal passes;
    repeating lets feedback across nested chips settle). now=0 keeps
    any internal clocks parked low so results are deterministic. */
-function settle(def: ChipDef, state: SimState, ins: number[], lib: ChipLib): number[] {
-  let outs: number[] = [];
+function settle(def: ChipDef, state: SimState, ins: number[], lib: ChipLib): bigint[] {
+  let outs: bigint[] = [];
   let prev = '';
   for (let i = 0; i < 4; i++) {
     outs = evalChip(def, state, ins, lib, 0, 0);
@@ -100,7 +105,7 @@ export function analyzeChip(def: ChipDef, lib: ChipLib): ChipAnalysisResult {
   }
 
   /* ── explore raw snapshot space ── */
-  interface RawNode { state: SimState; next: number[]; outs: number[][] } // per combo
+  interface RawNode { state: SimState; next: number[]; outs: bigint[][] } // per combo
   const nodes: RawNode[] = [];
   const idByKey = new Map<string, number>();
 

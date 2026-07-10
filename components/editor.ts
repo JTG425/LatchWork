@@ -9,7 +9,8 @@
     GRID, Comp, Wire, WireEnd, PinEnd, Vec, Board, ChipLib, CompType, EdgeMode,
     SimState, newSimState, getGeom, evaluateNet, analyzeNets,
     normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
-    MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, maskBits, CHIP_MIN_W, chipMinH,
+    MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, CHIP_MIN_W, chipMinH,
+    maskVal, storeVal, formatBusValue,
     SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType, isBusToolType, chipLabelOffset,
     wireRouteCorners, wireCornerPath, wireEndFacing, chipBodyPath,
   } from '@/lib/engine';
@@ -26,8 +27,8 @@
     nIns?: number;      // gates: input count; bus tools: bit count
     freq?: number;      // clocks
     bits?: number;      // wires: bus width
-    pinBits?: number;   // IPIN/OPIN/VAL: port bus width
-    val?: number;       // VAL / multi-bit IPIN: driven value (bus integer)
+    pinBits?: number;   // IPIN/OPIN/VAL: port bus width; gates: bitwise operand width
+    val?: bigint;       // VAL / multi-bit IPIN: driven value (bus integer)
     edgeable?: boolean; // gates/chips can be sampled on a clock edge
     edge?: EdgeMode;
   }
@@ -60,7 +61,7 @@
     setLabel(id: string, label: string): void;
     setNumInputs(id: string, n: number): void;
     setPinBits(id: string, bits: number): void;
-    setValue(id: string, val: number): void;
+    setValue(id: string, val: bigint): void;
     setFreq(id: string, hz: number): void;
     setEdge(id: string, edge: EdgeMode | null): void;
     setWireBits(id: string, bits: number): void;
@@ -107,7 +108,7 @@
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
   const SUPS = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
-  const sup = (n: number) => SUPS[n] ?? String(n);
+  const sup = (n: number) => String(n).split('').map(d => SUPS[+d] ?? d).join('');
   const edgeText = (c: Pick<Comp, 'edge'>) => c.edge === 'rise' ? ' / rise' : c.edge === 'fall' ? ' / fall' : '';
 
   export function createEditor(svg: SVGSVGElement, cb: EditorCallbacks): EditorApi {
@@ -198,8 +199,9 @@
     const find = (id: string) => comps.find(c => c.id === id);
 
     function selInfoFor(c: Comp): SelInfo {
+      // ports carry a pin width; gates carry a bitwise operand width
       const isPort = c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL';
-      const portBits = isPort ? clampBits(c.bits ?? 1) : undefined;
+      const portBits = isPort || isGateType(c.type) ? clampBits(c.bits ?? 1) : undefined;
       // VAL always takes a typed value; an IPIN only once it's a bus
       const valued = c.type === 'VAL' || (c.type === 'IPIN' && (portBits ?? 1) > 1);
       return {
@@ -211,7 +213,7 @@
           ? clampGateIns(c.nIns)
           : isBusToolType(c.type) ? clampBits(c.nIns ?? 4) : undefined,
         pinBits: portBits,
-        val: valued ? maskBits(c.val, portBits ?? 1) : undefined,
+        val: valued ? maskVal(c.val, portBits ?? 1) : undefined,
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
         edgeable: edgeableComp(c),
         edge: defaultEdgeForComp(c),
@@ -312,13 +314,13 @@
         return { x: isGateType(c.type) ? GATE_DEFS[c.type].stubX : 8, y: p.y };
       };
       g.ins.forEach((p, i) => {
-        const hi = c._ins?.[i] ?? 0;
+        const hi = c._ins?.[i] ? 1 : 0;
         const e = stubEnd(p, false);
         stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${p.x},${p.y} L${e.x},${e.y}"/>`;
         pins += pinSVG('in', i, p, hi);
       });
       g.outs.forEach((p, i) => {
-        const hi = sim.vals[c.id + ':' + i] | 0;
+        const hi = sim.vals[c.id + ':' + i] ? 1 : 0;
         const e = stubEnd(p, true);
         stubs += `<path class="stub ${hi ? 'hi' : ''}" d="M${e.x},${e.y} L${p.x},${p.y}"/>`;
         pins += pinSVG('out', i, p, hi);
@@ -328,6 +330,7 @@
         /* Body path, back curve, and inversion bubble all come from the
            gate's own file in lib/gates — look there for shape bugs. */
         const gd = GATE_DEFS[c.type];
+        const gb = clampBits(c.bits ?? 1);
         inner = `<path class="body" d="${gd.body(g.h)}"/>`;
         const curve = gd.backCurve?.(g.h);
         if (curve)
@@ -335,7 +338,7 @@
         const bub = gd.bubble?.(g.h);
         if (bub)
           inner += `<circle cx="${bub.cx}" cy="${bub.cy}" r="${bub.r}" class="body"/>`;
-        inner += caption(`${g.name}${edgeText(c)}`, 30, gd.captionY ?? g.h + 21);
+        inner += caption(`${g.name}${gb > 1 ? ` · ${gb}b` : ''}${edgeText(c)}`, 30, gd.captionY ?? g.h + 21);
       } else if (c.type === 'IN') {
         const on = !!c.on;
         inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
@@ -353,25 +356,25 @@
           <text class="pindigit hi" x="20" y="26"${ctr(20, 20)}>1</text>` +
           caption('HIGH', 20, 52);
       } else if (c.type === 'CLK') {
-        const on = sim.vals[c.id + ':0'] | 0;
+        const on = sim.vals[c.id + ':0'] ? 1 : 0;
         inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
           <path d="M10,${on ? 13 : 27} H19 V${on ? 27 : 13} H29 V${on ? 13 : 27} H39 V${on ? 27 : 13} H49"
             fill="none" stroke="${on ? 'var(--hi)' : 'var(--muted)'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
           caption(`${c.label || 'CLK'} · ${clampFreq(c.freq)}Hz`, 30, 52);
       } else if (c.type === 'IPIN') {
         const n = clampBits(c.bits ?? 1);
-        const v = n > 1 ? maskBits(c.val, n) : (c.on ? 1 : 0);
-        const lit = v !== 0;
-        const txt = n > 1 ? v.toString(2).padStart(n, '0') : String(v);
+        const v = n > 1 ? maskVal(c.val, n) : (c.on ? 1n : 0n);
+        const lit = v !== 0n;
+        const txt = n > 1 ? formatBusValue(v, n) : v.toString();
         const fs = n > 1 ? 12 : 15;
         inner = `<rect class="body pinport ${lit ? 'hi' : ''}" x="0" y="0" width="${g.w}" height="40" rx="7"/>
           <text class="pindigit ${lit ? 'hi' : ''}" x="${g.w / 2}" y="25" style="font-size:${fs}px"${ctr(g.w / 2, 20)}>${txt}</text>` +
           caption(`▸ ${c.label || 'IN?'}${n > 1 ? ` · ${n}b` : ''}`, g.w / 2, 52);
       } else if (c.type === 'OPIN') {
         const n = clampBits(c.bits ?? 1);
-        const v = maskBits(c._ins?.[0] ?? 0, n);
-        const lit = v !== 0;
-        const txt = n > 1 ? v.toString(2).padStart(n, '0') : String(v);
+        const v = maskVal(c._ins?.[0] ?? 0, n);
+        const lit = v !== 0n;
+        const txt = n > 1 ? formatBusValue(v, n) : v.toString();
         const fs = n > 1 ? 12 : 15;
         const shape = n > 1
           ? `<rect class="body pinport ${lit ? 'hi' : ''}" x="0" y="0" width="${g.w}" height="40" rx="19"/>`
@@ -381,9 +384,9 @@
           caption(`${c.label || 'OUT?'}${n > 1 ? ` · ${n}b` : ''} ▸`, g.w / 2, 52);
       } else if (c.type === 'VAL') {
         const n = clampBits(c.bits ?? 1);
-        const v = maskBits(c.val, n);
-        const lit = v !== 0;
-        const txt = v.toString(2).padStart(n, '0');
+        const v = maskVal(c.val, n);
+        const lit = v !== 0n;
+        const txt = formatBusValue(v, n);
         inner = `<rect class="body" x="0" y="0" width="${g.w}" height="40" rx="9"/>
           <text class="pindigit ${lit ? 'hi' : ''}" x="${g.w / 2}" y="25" style="font-size:12px"${ctr(g.w / 2, 20)}>${txt}</text>` +
           caption(`${c.label || 'VAL'} · ${n}b`, g.w / 2, 52);
@@ -421,11 +424,10 @@
           <text class="tunnelname${c.label?.trim() ? '' : ' unset'}" x="46" y="24"${ctr(46, 20)}>${esc(c.label?.trim() || 'name?')}</text>` +
           caption('TUNNEL', 40, 52);
       } else if (c.type === 'COMB') {
-        const v = sim.vals[c.id + ':0'] | 0;
         const n = g.ins.length;
-        const mask = (2 ** n) - 1;
+        const v = maskVal(sim.vals[c.id + ':0'], n);
         inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${(v % (mask + 1)).toString(2).padStart(n, '0')}</text>`;
+          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${formatBusValue(v, n)}</text>`;
         g.ins.forEach((p, i) => {
           // MSB on top: label each pin with its bit weight
           inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>2${sup(n - 1 - i)}</text>`;
@@ -433,10 +435,9 @@
         inner += caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
       } else if (c.type === 'SPLIT') {
         const n = g.outs.length;
-        const v = c._ins?.[0] ?? 0;
-        const mask = (2 ** n) - 1;
+        const v = maskVal(c._ins?.[0] ?? 0, n);
         inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${(v % (mask + 1)).toString(2).padStart(n, '0')}</text>`;
+          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${formatBusValue(v, n)}</text>`;
         g.ins.forEach(p => {
           inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`;
         });
@@ -446,7 +447,7 @@
         inner += caption(c.label || 'SPLIT', g.w / 2, g.h + 14);
       } else if (isMemoryType(c.type)) {
         const edge = defaultEdgeForComp(c);
-        const q = sim.vals[c.id + ':0'] | 0;
+        const q = sim.vals[c.id + ':0'] ? 1 : 0;
         const edgeLabel = edge ? `${edge} edge` : '';
         inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
           <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(c.label || g.name)}</text>
@@ -499,8 +500,8 @@
 
       const nets = analyzeNets(wires, tunnelPinGroups(comps));
       const netVal = (keys?: string[]) => {
-        let v = 0;
-        if (keys) for (const k of keys) v |= sim.vals[k] | 0;
+        let v = 0n;
+        if (keys) for (const k of keys) v |= sim.vals[k] ?? 0n;
         return v;
       };
 
@@ -513,10 +514,9 @@
         const bits = clampBits(w.bits);
         out += `<g><path class="wirehit" data-wire="${w.id}" d="${d}"/><path class="wire${bits > 1 ? ' bus' : ''}${hi ? ' hi' : ''}${selCls}" d="${d}"/></g>`;
         if (bits > 1) {
-          // live bus readout, MSB first, padded to the wire's width
-          const v = Math.max(0, hi) % (2 ** bits);
+          // live bus readout — binary up to 4 bits, hex beyond
           out += `<text class="buslabel${hi ? ' hi' : ''}" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 9}"
-            text-anchor="middle">${v.toString(2).padStart(bits, '0')}</text>`;
+            text-anchor="middle">${formatBusValue(hi, bits)}</text>`;
         }
       }
       if (wiring) {
@@ -541,7 +541,7 @@
         if (!c) continue;
         const p = pinPos(c, side as 'in' | 'out', +pin);
         const hi = side === 'out'
-          ? (sim.vals[compId + ':' + pin] | 0)
+          ? (sim.vals[compId + ':' + pin] ?? 0n)
           : netVal(nets.inputDrivers.get(compId + ':' + pin));
         out += `<circle class="junction${hi ? ' hi' : ''}" cx="${p.x}" cy="${p.y}" r="5"/>`;
       }
@@ -1125,9 +1125,11 @@
       },
       setPinBits(id, bits) {
         const c = find(id);
-        if (!c || !(c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL')) return;
+        // ports resize their bus; gates resize their bitwise operand width
+        if (!c || !(c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL' || isGateType(c.type))) return;
         c.bits = clampBits(bits);
-        if (c.val != null) c.val = maskBits(c.val, c.bits);
+        if (c.bits === 1 && isGateType(c.type)) delete c.bits;
+        if (c.val != null) c.val = storeVal(maskVal(c.val, c.bits ?? 1));
         // re-seed connected wires' bus width from the resized pin
         for (const w of wires) {
           if (![w.a, w.b].some(e => isPinEnd(e) && e.comp === id)) continue;
@@ -1142,7 +1144,7 @@
         if (!c || !(c.type === 'VAL' || c.type === 'IPIN')) return;
         // no emitSel: the value field is a controlled draft; re-emitting
         // would clobber the user's keystrokes with the canonical form
-        c.val = maskBits(val, clampBits(c.bits ?? 1));
+        c.val = storeVal(maskVal(val, clampBits(c.bits ?? 1)));
         refresh();
       },
       setFreq(id, hz) {
