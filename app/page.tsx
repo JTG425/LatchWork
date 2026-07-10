@@ -1,19 +1,8 @@
 import Simulator, { SimUser } from '@/components/Simulator';
-import { auth0, authConfigured, authEnv } from '@/auth';
-import type { AuthPublicConfig } from '@/lib/auth-embedded';
+import { auth0, authConfigured } from '@/auth';
 
 export default async function Home() {
   let user: SimUser | null = null;
-
-  /* Public Auth0 values for the embedded sign-in dialog (the client id
-     is public by design — it appears in every /authorize URL). */
-  const auth: AuthPublicConfig | null = authConfigured
-    ? {
-        domain: authEnv.domain!,
-        clientId: authEnv.clientId!,
-        realm: authEnv.connection,
-      }
-    : null;
 
   if (authConfigured) {
     try {
@@ -30,5 +19,5 @@ export default async function Home() {
     }
   }
 
-  return <Simulator user={user} auth={auth} />;
+  return <Simulator user={user} authEnabled={authConfigured} />;
 }
