@@ -674,35 +674,50 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     if ((e.target as HTMLElement).closest('.chip-actions,.folderpop')) return;
     e.preventDefault();
     setFolderMenu(null);
+    const pid = e.pointerId;
+    // Capture the pointer so the release always reaches us — without it,
+    // Safari/touch can drop the pointerup mid-drag, stranding the ghost
+    // on screen and never delivering the chip to the folder.
+    try { (e.currentTarget as HTMLElement).setPointerCapture(pid); } catch {}
     const startX = e.clientX, startY = e.clientY;
     let dragging = false;
+    let done = false;
     const targetAt = (x: number, y: number) => {
       const el = document.elementFromPoint(x, y)?.closest('[data-drop]') as HTMLElement | null;
       return el ? (el.dataset.drop ?? null) : null;
     };
     const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return;
       if (!dragging && Math.hypot(ev.clientX - startX, ev.clientY - startY) > 6) dragging = true;
       if (dragging) {
         setDrag({ chip: def, x: ev.clientX, y: ev.clientY });
         setDropTarget(targetAt(ev.clientX, ev.clientY));
       }
     };
-    const up = (ev: PointerEvent) => {
+    const finish = (ev: PointerEvent | null) => {
+      if (done) return;
+      done = true;
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', up);
+      window.removeEventListener('blur', cancel);
       if (dragging) {
-        const t = ev.type === 'pointerup' ? targetAt(ev.clientX, ev.clientY) : null;
-        if (t != null) dropChipToFolder(def, t);
+        // Clear the ghost before touching the chip list so nothing that
+        // goes wrong in the move can leave the drag graphic frozen.
         setDrag(null);
         setDropTarget(null);
-      } else if (ev.type === 'pointerup') {
+        const t = ev && ev.type === 'pointerup' ? targetAt(ev.clientX, ev.clientY) : null;
+        if (t != null) dropChipToFolder(def, t);
+      } else if (ev && ev.type === 'pointerup') {
         placeChip(def);
       }
     };
+    const up = (ev: PointerEvent) => { if (ev.pointerId === pid) finish(ev); };
+    const cancel = () => finish(null);
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', up);
+    window.addEventListener('blur', cancel);
   };
 
   const onLabelChange = (v: string) => {
