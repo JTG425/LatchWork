@@ -28,6 +28,11 @@ export type WireEnd = PinEnd | AttachEnd | Vec;
 export const isPinEnd = (e: WireEnd): e is PinEnd => (e as PinEnd).comp !== undefined;
 export const isAttachEnd = (e: WireEnd): e is AttachEnd => (e as AttachEnd).wire !== undefined;
 
+export const cloneWireEnd = (e: WireEnd): WireEnd =>
+  isPinEnd(e) ? { comp: e.comp, side: e.side, pin: e.pin }
+    : isAttachEnd(e) ? { wire: e.wire, x: e.x, y: e.y }
+      : { x: (e as Vec).x, y: (e as Vec).y };
+
 /* via: optional user-routed waypoints (grid-snapped), ordered a → b;
    bits: bus width (1 = plain wire). Signal values are bigints, so a
    net carries a whole bus value; `bits` sets how it's masked and
@@ -102,8 +107,6 @@ export function normalizeWires(list: unknown): Wire[] {
     return w as Wire;
   });
 }
-export const migrateChipDef = (def: ChipDef): ChipDef =>
-  ({ ...def, wires: normalizeWires(def.wires) });
 
 /* ── wire auto-routing ──────────────────────────────────────────────
    Corner points for a wire with no user waypoints. Shared by the live
@@ -236,6 +239,31 @@ export function analyzeNets(wires: Wire[], unionPins?: string[][]): NetInfo {
 
 export interface Board { comps: Comp[]; wires: Wire[] }
 
+const cloneCompForSave = (c: Comp): Comp => {
+  const { _ins, ...rest } = c;
+  const out: Comp = { ...rest };
+  const rawVal = (c as Comp & { val?: number | string | bigint }).val;
+  if (typeof rawVal === 'bigint') out.val = storeVal(maskVal(rawVal, clampBits(out.bits ?? 1)));
+  return out;
+};
+
+export const cloneWire = (w: Wire): Wire => ({
+  id: w.id,
+  a: cloneWireEnd(w.a),
+  b: cloneWireEnd(w.b),
+  ...(w.via ? { via: w.via.map(v => ({ x: v.x, y: v.y })) } : {}),
+  ...(w.bits ? { bits: w.bits } : {}),
+});
+
+/* Persistence-safe board clone: strips live simulator input snapshots and
+   converts any stray bigint component values back to JSON-safe storage. */
+export function cloneBoard(board: Board): Board {
+  return {
+    comps: (board.comps ?? []).map(cloneCompForSave),
+    wires: normalizeWires(board.wires).map(cloneWire),
+  };
+}
+
 /* Optional user-authored placement for one chip pin.
    side: which edge it sits on (Left/Right/Top/Bottom); slot: grid index
    along that edge (rows for L/R, columns for T/B); lx/ly: pixel nudge
@@ -280,6 +308,31 @@ export interface ChipDef {
   wires: Wire[];
   createdAt: number;
 }
+export function sanitizeChipDef(def: ChipDef): ChipDef {
+  const board = cloneBoard({ comps: def.comps ?? [], wires: def.wires ?? [] });
+  return {
+    ...def,
+    inputs: [...(def.inputs ?? [])],
+    outputs: [...(def.outputs ?? [])],
+    inputComps: [...(def.inputComps ?? [])],
+    outputComps: [...(def.outputComps ?? [])],
+    ...(def.inputBits ? { inputBits: [...def.inputBits] } : {}),
+    ...(def.outputBits ? { outputBits: [...def.outputBits] } : {}),
+    ...(def.layout ? {
+      layout: {
+        w: def.layout.w,
+        h: def.layout.h,
+        ins: def.layout.ins.map(p => ({ ...p })),
+        outs: def.layout.outs.map(p => ({ ...p })),
+      },
+    } : {}),
+    ...(def.shape ? { shape: def.shape } : {}),
+    ...(def.shapePts ? { shapePts: def.shapePts.map(p => ({ x: p.x, y: p.y })) } : {}),
+    comps: board.comps,
+    wires: board.wires,
+  };
+}
+export const migrateChipDef = (def: ChipDef): ChipDef => sanitizeChipDef(def);
 export const chipInputBits = (def: ChipDef): number[] =>
   def.inputs.map((_, i) => clampBits(def.inputBits?.[i] ?? 1));
 export const chipOutputBits = (def: ChipDef): number[] =>
@@ -696,12 +749,13 @@ function edgeAllowsUpdate(c: Comp, g: CompGeom, ins: bigint[], state: SimState, 
   return ok;
 }
 
-function refreshInputSnapshots(comps: Comp[], state: SimState, lib: ChipLib, nets: NetInfo) {
+function refreshInputSnapshots(comps: Comp[], state: SimState, lib: ChipLib, nets: NetInfo, captureInputs: boolean) {
   state.prevIns ??= {};
   for (const c of comps) {
     const g = getGeom(c, lib);
-    c._ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
-    state.prevIns[c.id] = c._ins.map(bit);
+    const ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
+    if (captureInputs) c._ins = ins; else delete c._ins;
+    state.prevIns[c.id] = ins.map(bit);
   }
 }
 
@@ -808,6 +862,7 @@ export function evaluateNet(
   boundIns?: Map<string, bigint>,
   depth = 0,
   now = Date.now(),
+  captureInputs = true,
 ): void {
   if (depth > 12) return;
 
@@ -835,7 +890,7 @@ export function evaluateNet(
     for (const c of comps) {
       const g = getGeom(c, lib);
       const ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
-      c._ins = ins;
+      if (captureInputs) c._ins = ins; else delete c._ins;
 
       let outs: BusVal[];
       const edgeUpdate = isMemoryType(c.type) ? null : edgeAllowsUpdate(c, g, ins, state, edgeFired);
@@ -874,7 +929,7 @@ export function evaluateNet(
     if (!changed) break;
   }
 
-  refreshInputSnapshots(comps, state, lib, nets);
+  refreshInputSnapshots(comps, state, lib, nets, captureInputs);
 }
 
 export function evalChip(
@@ -891,7 +946,7 @@ export function evalChip(
   const bound = new Map<string, bigint>();
   def.inputComps.forEach((id, i) => bound.set(id, inB ? maskVal(ins[i], inB[i]) : BigInt(bit(ins[i]))));
 
-  evaluateNet(def.comps, def.wires, state, lib, bound, depth, now);
+  evaluateNet(def.comps, def.wires, state, lib, bound, depth, now, false);
 
   const nets = analyzeNets(def.wires, tunnelPinGroups(def.comps));
   return def.outputComps.map((id, i) => {
@@ -937,8 +992,7 @@ export interface ChipPackage {
 }
 
 export function makeChipDef(name: string, board: Board, pkg?: ChipPackage): ChipDef {
-  const comps: Comp[] = JSON.parse(JSON.stringify(board.comps.map(({ _ins, ...rest }) => rest)));
-  const wires: Wire[] = JSON.parse(JSON.stringify(board.wires));
+  const { comps, wires } = cloneBoard(board);
 
   const { inComps, outComps } = chipPinSources({ comps, wires });
 

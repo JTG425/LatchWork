@@ -7,7 +7,7 @@ import {
   PALETTE_ORDER, getGeom, chipBodyPath,
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
   isMemoryType, isBusToolType, MAX_WIRE_BITS, clampBits,
-  chipPinSources, chipPinName, defaultChipLayout,
+  chipPinSources, chipPinName, defaultChipLayout, cloneBoard, sanitizeChipDef,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
@@ -270,15 +270,16 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   }, []);
 
   const setChips = useCallback((list: ChipDef[], persist = true) => {
-    chipsRef.current = Object.fromEntries(list.map(c => [c.id, c]));
-    setChipsState(list);
+    const clean = list.map(sanitizeChipDef);
+    chipsRef.current = Object.fromEntries(clean.map(c => [c.id, c]));
+    setChipsState(clean);
     if (!persist) return;
-    try { localStorage.setItem(LS_CHIPS, JSON.stringify(list)); } catch {}
+    try { localStorage.setItem(LS_CHIPS, JSON.stringify(clean)); } catch {}
     if (user) {
       fetch('/api/chips', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(list),
+        body: JSON.stringify(clean),
       }).catch(() => {});
     }
   }, [user]);
@@ -291,7 +292,8 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
 
   const persistTabs = useCallback(() => {
     try {
-      localStorage.setItem(LS_TABS, JSON.stringify({ tabs: tabsRef.current, active: activeTabRef.current }));
+      const tabs = tabsRef.current.map(t => ({ ...t, board: cloneBoard(t.board) }));
+      localStorage.setItem(LS_TABS, JSON.stringify({ tabs, active: activeTabRef.current }));
     } catch {}
   }, []);
 
@@ -357,7 +359,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     setPeek(null);
     const existing = tabsRef.current.find(t => t.chipId === def.id);
     if (existing) { switchTab(existing.id); return; }
-    addTab(def.name, JSON.parse(JSON.stringify({ comps: def.comps, wires: def.wires })), def.id);
+    addTab(def.name, cloneBoard({ comps: def.comps, wires: def.wires }), def.id);
   }, [switchTab, addTab]);
 
   const askEditChip = useCallback((chipId: string) => {

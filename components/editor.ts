@@ -13,6 +13,7 @@
     maskVal, storeVal, formatBusValue,
     SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType, isBusToolType, chipLabelOffset,
     wireRouteCorners, wireCornerPath, wireEndFacing, chipBodyPath,
+    cloneBoard, cloneWireEnd,
   } from '@/lib/engine';
   import { GATE_DEFS, isGateType } from '@/lib/gates';
 
@@ -694,11 +695,11 @@
 
     function copySelection() {
       if (!selIds.size) return;
-      const cs: Comp[] = comps.filter(c => selIds.has(c.id))
-        .map(({ _ins, ...rest }) => JSON.parse(JSON.stringify(rest)));
       const included = wiresInSelection();
-      const ws: Wire[] = wires.filter(w => included.has(w.id)).map(w => JSON.parse(JSON.stringify(w)));
-      clipboard = { comps: cs, wires: ws };
+      clipboard = cloneBoard({
+        comps: comps.filter(c => selIds.has(c.id)),
+        wires: wires.filter(w => included.has(w.id)),
+      });
     }
 
     function paste() {
@@ -712,7 +713,7 @@
       const newComps: Comp[] = clipboard.comps.map(c => {
         const id = uid();
         idMap.set(c.id, id);
-        return { ...JSON.parse(JSON.stringify(c)), id, x: c.x + dx, y: c.y + dy };
+        return { ...c, id, x: c.x + dx, y: c.y + dy };
       });
       const wireIdMap = new Map<string, string>(clipboard.wires.map(w => [w.id, uid()]));
       const shiftEnd = (e: WireEnd): WireEnd => {
@@ -809,8 +810,8 @@
         const carried = wiresInSelection();
         const dragWires = wires.filter(w => carried.has(w.id)).map(w => ({
           w, via: (w.via ?? []).map(v => ({ ...v })),
-          a: JSON.parse(JSON.stringify(w.a)) as WireEnd,
-          b: JSON.parse(JSON.stringify(w.b)) as WireEnd,
+          a: cloneWireEnd(w.a),
+          b: cloneWireEnd(w.b),
         }));
         drag = { ids: [...selIds], primary: c.id, offs, orig, dragWires, moved: false, sx: e.clientX, sy: e.clientY };
         refresh(false);
@@ -1169,15 +1170,13 @@
         refresh();
       },
       getBoard(): Board {
-        return JSON.parse(JSON.stringify({
-          comps: comps.map(({ _ins, ...rest }) => rest),
-          wires,
-        }));
+        return cloneBoard({ comps, wires });
       },
       setBoard(b: Board) {
         const known = lib();
-        comps = (b.comps || []).filter(c => c.type !== 'CHIP' || (c.chipId && known[c.chipId]));
-        wires = normalizeWires(b.wires).filter(w =>
+        const clean = cloneBoard(b);
+        comps = clean.comps.filter(c => c.type !== 'CHIP' || (c.chipId && known[c.chipId]));
+        wires = normalizeWires(clean.wires).filter(w =>
           [w.a, w.b].every(e => !isPinEnd(e) || comps.some(c => c.id === e.comp)));
         pruneAttached();
         sim = newSimState();
