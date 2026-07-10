@@ -799,7 +799,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const selSub = sel?.kind === 'comp' && sel.type
     ? (sel.type === 'CHIP'
       ? (sel.chipId && lib[sel.chipId] ? `custom chip · ${lib[sel.chipId].inputs.length} in · ${lib[sel.chipId].outputs.length} out` : 'custom chip')
-      : getGeom({ type: sel.type }, lib).sub)
+      : getGeom({ type: sel.type, bits: sel.pinBits }, lib).sub)
     : sel?.kind === 'wire' ? 'select a width to make it a bus'
     : sel?.kind === 'multi' ? 'drag to move together' : '';
 
@@ -1230,7 +1230,9 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                   <label className="side-field"
                     title={sel.type && isGateType(sel.type)
                       ? `Operand width — the gate applies its logic bitwise across buses up to ${MAX_WIRE_BITS} bits`
-                      : 'Pin bus width — how many bits this pin carries'}>
+                      : sel.type && isMemoryType(sel.type)
+                        ? `Data width — the cell stores an N-bit bus (up to ${MAX_WIRE_BITS}); clock/enable stay 1-bit`
+                        : 'Pin bus width — how many bits this pin carries'}>
                     <span>Bits</span>
                     <input
                       className="mono"
@@ -1239,7 +1241,8 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                       max={MAX_WIRE_BITS}
                       step={1}
                       value={sel.pinBits}
-                      aria-label={sel.type && isGateType(sel.type) ? 'Gate operand width' : 'Pin bus width'}
+                      aria-label={sel.type && isGateType(sel.type) ? 'Gate operand width'
+                        : sel.type && isMemoryType(sel.type) ? 'Memory data width' : 'Pin bus width'}
                       onChange={e => onPinBitsChange(e.target.valueAsNumber)}
                     />
                   </label>

@@ -29,7 +29,7 @@
     nIns?: number;      // gates: input count; bus tools: bit count
     freq?: number;      // clocks
     bits?: number;      // wires: bus width
-    pinBits?: number;   // IPIN/OPIN/VAL: port bus width; gates: bitwise operand width
+    pinBits?: number;   // IPIN/OPIN/VAL: port bus width; gates/memory: bitwise data width
     val?: bigint;       // VAL / multi-bit IPIN: driven value (bus integer)
     edgeable?: boolean; // gates/chips can be sampled on a clock edge
     edge?: EdgeMode;
@@ -206,9 +206,9 @@
     const find = (id: string) => comps.find(c => c.id === id);
 
     function selInfoFor(c: Comp): SelInfo {
-      // ports carry a pin width; gates carry a bitwise operand width
+      // ports carry a pin width; gates and memory carry a bitwise data width
       const isPort = c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL';
-      const portBits = isPort || isGateType(c.type) ? clampBits(c.bits ?? 1) : undefined;
+      const portBits = isPort || isGateType(c.type) || isMemoryType(c.type) ? clampBits(c.bits ?? 1) : undefined;
       // VAL always takes a typed value; an IPIN only once it's a bus
       const valued = c.type === 'VAL' || (c.type === 'IPIN' && (portBits ?? 1) > 1);
       return {
@@ -454,11 +454,13 @@
         inner += caption(c.label || (isComb ? 'COMBINE' : 'SPLIT'), g.w / 2, g.h + 14);
       } else if (isMemoryType(c.type)) {
         const edge = defaultEdgeForComp(c);
-        const q = sim.vals[c.id + ':0'] ? 1 : 0;
-        const edgeLabel = edge ? `${edge} edge` : '';
+        const n = clampBits(c.bits ?? 1);
+        const q = maskVal(sim.vals[c.id + ':0'], n);
+        const qTxt = n > 1 ? formatBusValue(q, n) : q.toString();
+        const edgeLabel = [edge ? `${edge} edge` : '', n > 1 ? `${n}b` : ''].filter(Boolean).join(' · ');
         inner = `<rect class="body chipbody" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
           <text class="chipname" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${esc(c.label || g.name)}</text>
-          <text class="combval ${q ? 'hi' : ''}" x="${g.w / 2}" y="${g.h / 2 + 24}"${ctr(g.w / 2, g.h / 2 + 24)}>Q=${q}</text>`;
+          <text class="combval ${q !== 0n ? 'hi' : ''}" x="${g.w / 2}" y="${g.h / 2 + 24}"${ctr(g.w / 2, g.h / 2 + 24)}>Q=${qTxt}</text>`;
         g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
         g.outs.forEach(p => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>${esc(p.name || '')}</text>`; });
         if (edgeLabel) inner += caption(edgeLabel, g.w / 2, g.h + 14);
@@ -1141,10 +1143,10 @@
       },
       setPinBits(id, bits) {
         const c = find(id);
-        // ports resize their bus; gates resize their bitwise operand width
-        if (!c || !(c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL' || isGateType(c.type))) return;
+        // ports resize their bus; gates and memory their bitwise data width
+        if (!c || !(c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL' || isGateType(c.type) || isMemoryType(c.type))) return;
         c.bits = clampBits(bits);
-        if (c.bits === 1 && isGateType(c.type)) delete c.bits;
+        if (c.bits === 1 && (isGateType(c.type) || isMemoryType(c.type))) delete c.bits;
         if (c.val != null) c.val = storeVal(maskVal(c.val, c.bits ?? 1));
         // re-seed connected wires' bus width from the resized pin
         for (const w of wires) {
