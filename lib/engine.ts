@@ -50,7 +50,7 @@ export interface Comp {
   on?: boolean; pressed?: boolean; label?: string; chipId?: string;
   rot?: number;           // 0 right (default), 1 down, 2 left, 3 up
   nIns?: number;          // gates: input count (2-4); bus tools: bit count (1-64)
-  bits?: number;          // IPIN/OPIN/VAL: pin bus width; gates: bitwise operand width (1-64)
+  bits?: number;          // IPIN/OPIN/VAL: pin bus width; gates & memory: bitwise data width (1-64)
   val?: number | string;  // VAL / multi-bit IPIN: the driven bus value (string beyond 2⁵³)
   w?: number; h?: number; // chips & bus tools: user-resized body, grid multiples
   layout?: ChipLayout;    // COMB/SPLIT: per-instance pin placement (default auto)
@@ -609,6 +609,24 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
     };
   }
 
+  if (isMemoryType(c.type)) {
+    // Memory cells store whole buses: data pins (S/R, D, J/K, T) and the
+    // Q/Q̄ outputs share the cell's width; CLK and EN stay 1-bit controls.
+    // The body widens so the live Q readout fits.
+    const base = PRIM[c.type];
+    const n = clampBits(c.bits ?? 1);
+    if (n === 1) return base;
+    const w = Math.max(base.w, Math.ceil((busTextChars(n) * 8 + 32) / GRID) * GRID);
+    const widen = (p: Pin): Pin => (MEMORY_CONTROL_PINS.has(p.name ?? '') ? { ...p } : { ...p, bits: n });
+    return {
+      ...base,
+      sub: `${base.sub} · ${n}-bit`,
+      w,
+      ins: base.ins.map(widen),
+      outs: base.outs.map(p => ({ ...widen(p), x: w + 20 })),
+    };
+  }
+
   // Ports whose body widens to show an n-bit binary value.
   if (c.type === 'IPIN' || c.type === 'VAL') {
     const n = clampBits(c.bits ?? 1);
@@ -626,6 +644,8 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
 
 const bit = (v: BusVal | undefined) => (v ? 1 : 0);
 const MEMORY_TYPES: ReadonlySet<CompType> = new Set(['SRLATCH', 'DLATCH', 'JKFF', 'DFF', 'SRFF', 'TFF']);
+/* Memory pins that stay 1-bit controls no matter the cell's data width. */
+const MEMORY_CONTROL_PINS: ReadonlySet<string> = new Set(['CLK', 'EN']);
 const EDGE_MEMORY_TYPES: ReadonlySet<CompType> = new Set(['JKFF', 'DFF', 'SRFF', 'TFF']);
 export const isMemoryType = (type: CompType) => MEMORY_TYPES.has(type);
 export const defaultEdgeForComp = (c: Pick<Comp, 'type' | 'edge'>): EdgeMode | undefined => {
@@ -650,52 +670,54 @@ function memoryTriggered(c: Comp, g: CompGeom, ins: bigint[], state: SimState, f
   return ok;
 }
 
-function memoryOut(q: number, invalid = false): number[] {
-  const v = bit(q);
-  return invalid ? [0, 0] : [v, v ? 0 : 1];
+/* [Q, Q̄] for an n-bit cell. Bit positions in `invalid` (S and R both
+   high on that bit) drive 0 on both outputs, matching the classic 1-bit
+   forbidden state. */
+function memoryOut(q: bigint, mask: bigint, invalid = 0n): bigint[] {
+  return [q & mask & ~invalid, ~q & mask & ~invalid];
 }
 
-function evalMemory(c: Comp, g: CompGeom, ins: bigint[], state: SimState, edgeFired: Set<string>): number[] {
-  let q = bit(state.vals[c.id + ':0']);
+/* Memory cells generalize bitwise across their data width n: each bit
+   position runs the classic 1-bit cell independently, all sharing one
+   clock/enable. Width 1 (the default) is exactly the classic behavior. */
+function evalMemory(c: Comp, g: CompGeom, ins: bigint[], state: SimState, edgeFired: Set<string>): bigint[] {
+  const n = clampBits(c.bits ?? 1);
+  const mask = (1n << BigInt(n)) - 1n;
+  let q = (state.vals[c.id + ':0'] ?? 0n) & mask;
 
   switch (c.type) {
     case 'SRLATCH': {
-      const s = bit(ins[0]), r = bit(ins[1]);
-      if (s && r) return memoryOut(q, true);
-      if (s) q = 1;
-      else if (r) q = 0;
-      return memoryOut(q);
+      const s = ins[0] & mask, r = ins[1] & mask;
+      q = (q & ~r) | s;
+      return memoryOut(q, mask, s & r);
     }
 
     case 'DLATCH':
-      if (bit(ins[1])) q = bit(ins[0]);
-      return memoryOut(q);
+      if (bit(ins[1])) q = ins[0] & mask;
+      return memoryOut(q, mask);
 
     case 'JKFF':
       if (memoryTriggered(c, g, ins, state, edgeFired)) {
-        const j = bit(ins[0]), k = bit(ins[2]);
-        if (j && k) q = q ? 0 : 1;
-        else if (j) q = 1;
-        else if (k) q = 0;
+        const j = ins[0] & mask, k = ins[2] & mask;
+        q = (j & ~q) | (q & ~k);   // set, toggle, reset, hold — per bit
       }
-      return memoryOut(q);
+      return memoryOut(q, mask);
 
     case 'DFF':
-      if (memoryTriggered(c, g, ins, state, edgeFired)) q = bit(ins[0]);
-      return memoryOut(q);
+      if (memoryTriggered(c, g, ins, state, edgeFired)) q = ins[0] & mask;
+      return memoryOut(q, mask);
 
     case 'SRFF':
       if (memoryTriggered(c, g, ins, state, edgeFired)) {
-        const s = bit(ins[0]), r = bit(ins[2]);
-        if (s && r) return memoryOut(q, true);
-        if (s) q = 1;
-        else if (r) q = 0;
+        const s = ins[0] & mask, r = ins[2] & mask;
+        q = (q & ~r) | s;
+        return memoryOut(q, mask, s & r);
       }
-      return memoryOut(q);
+      return memoryOut(q, mask);
 
     case 'TFF':
-      if (memoryTriggered(c, g, ins, state, edgeFired) && bit(ins[0])) q = q ? 0 : 1;
-      return memoryOut(q);
+      if (memoryTriggered(c, g, ins, state, edgeFired)) q ^= ins[0] & mask;
+      return memoryOut(q, mask);
 
     default:
       return [];
@@ -1071,14 +1093,14 @@ export function makeChipDef(name: string, board: Board, pkg?: ChipPackage): Chip
 }
 
 /* ── chip-wide bit scaling ──────────────────────────────────────────
-   The width every bit-carrying part of a chip shares (gates, IPIN/OPIN
-   ports, VAL constants) — null when the chip mixes widths or has no
-   such parts. Drives the "Bits" control shown when a placed chip is
-   selected. */
+   The width every bit-carrying part of a chip shares (gates, memory
+   cells, IPIN/OPIN ports, VAL constants) — null when the chip mixes
+   widths or has no such parts. Drives the "Bits" control shown when a
+   placed chip is selected. */
 export function chipUniformBits(def: ChipDef): number | null {
   let n: number | null = null;
   for (const c of def.comps) {
-    if (!isGateType(c.type) && c.type !== 'IPIN' && c.type !== 'OPIN' && c.type !== 'VAL') continue;
+    if (!isGateType(c.type) && !isMemoryType(c.type) && c.type !== 'IPIN' && c.type !== 'OPIN' && c.type !== 'VAL') continue;
     const b = clampBits(c.bits ?? 1);
     if (n === null) n = b;
     else if (n !== b) return null;
@@ -1086,15 +1108,15 @@ export function chipUniformBits(def: ChipDef): number | null {
   return n;
 }
 
-/* Rescale a whole chip to an n-bit bus width: every gate, input/output
-   pin, and value constant inside takes width n, and wire widths are
-   re-seeded from the pins they touch (free-floating bus wires scale
-   too). Structural parts — memory cells, combiner/splitter bit counts,
+/* Rescale a whole chip to an n-bit bus width: every gate, memory cell,
+   input/output pin, and value constant inside takes width n, and wire
+   widths are re-seeded from the pins they touch (free-floating bus
+   wires scale too). Structural parts — combiner/splitter bit counts
    and nested chips — are left alone. Returns a new sanitized def. */
 export function scaleChipDefBits(def: ChipDef, bits: number, lib: ChipLib): ChipDef {
   const n = clampBits(bits);
   const comps = def.comps.map((c): Comp => {
-    if (isGateType(c.type)) {
+    if (isGateType(c.type) || isMemoryType(c.type)) {
       const { bits: _b, ...rest } = c;
       return n > 1 ? { ...rest, bits: n } : rest;
     }
