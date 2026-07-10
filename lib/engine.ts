@@ -52,7 +52,8 @@ export interface Comp {
   nIns?: number;          // gates: input count (2-4); bus tools: bit count (1-64)
   bits?: number;          // IPIN/OPIN/VAL: pin bus width; gates: bitwise operand width (1-64)
   val?: number | string;  // VAL / multi-bit IPIN: the driven bus value (string beyond 2⁵³)
-  w?: number; h?: number; // chips: user-resized body, grid multiples
+  w?: number; h?: number; // chips & bus tools: user-resized body, grid multiples
+  layout?: ChipLayout;    // COMB/SPLIT: per-instance pin placement (default auto)
   freq?: number;          // CLK: full cycles per second
   edge?: EdgeMode;         // gates/chips: update only on this clock edge
   clockPin?: number;       // optional explicit clock input index
@@ -243,6 +244,7 @@ export interface Board { comps: Comp[]; wires: Wire[] }
 const cloneCompForSave = (c: Comp): Comp => {
   const { _ins, ...rest } = c;
   const out: Comp = { ...rest };
+  if (c.layout) out.layout = cloneChipLayout(c.layout);
   const rawVal = (c as Comp & { val?: number | string | bigint }).val;
   if (typeof rawVal === 'bigint') out.val = storeVal(maskVal(rawVal, clampBits(out.bits ?? 1)));
   return out;
@@ -272,6 +274,13 @@ export function cloneBoard(board: Board): Board {
 export type PinSide = 'L' | 'R' | 'T' | 'B';
 export interface PinSlot { side: PinSide; slot: number; lx: number; ly: number }
 export interface ChipLayout { w: number; h: number; ins: PinSlot[]; outs: PinSlot[] }
+
+export const cloneChipLayout = (l: ChipLayout): ChipLayout => ({
+  w: l.w,
+  h: l.h,
+  ins: l.ins.map(p => ({ ...p })),
+  outs: l.outs.map(p => ({ ...p })),
+});
 
 /* Package silhouette drawn for a placed chip. 'custom' uses shapePts —
    a user-drawn polygon stored as fractions of the body (0..1 × 0..1)
@@ -424,12 +433,20 @@ export const PALETTE_ORDER: [string, CompType[]][] = [
 
 /* Gates whose input count can be edited (NOT is always 1-in) */
 export const MULTI_IN_GATES: ReadonlySet<CompType> = new Set(GATE_TYPES.filter(t => GATE_DEFS[t].multiIn));
-export const MAX_GATE_INS = 4;
+export const MAX_GATE_INS = 32;
 export const clampGateIns = (n?: number) => {
   const v = Number.isFinite(n) ? n! : 2;
   return Math.min(MAX_GATE_INS, Math.max(2, Math.round(v)));
 };
 export const isBusToolType = (type: CompType) => type === 'COMB' || type === 'SPLIT';
+export const busToolMinW = (type: CompType) => (type === 'SPLIT' ? 80 : 60);
+export const busToolMinH = (c: Pick<Comp, 'nIns' | 'layout'>) =>
+  c.layout ? GRID * 2 : Math.max(40, (clampBits(c.nIns ?? 4) - 1) * GRID);
+
+/* Bit-weight pin name for COMB/SPLIT bit lines — MSB first ('2³'…'2⁰'). */
+const SUPS = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+export const bitWeightName = (n: number, i: number) =>
+  '2' + String(n - 1 - i).split('').map(d => SUPS[+d] ?? d).join('');
 
 export const CHIP_MIN_W = 80;
 export const chipMinH = (def: ChipDef) =>
@@ -437,6 +454,21 @@ export const chipMinH = (def: ChipDef) =>
 
 export const CLK_MIN_HZ = 0.1, CLK_MAX_HZ = 20;
 export const clampFreq = (hz?: number) => Math.min(CLK_MAX_HZ, Math.max(CLK_MIN_HZ, hz ?? 1));
+
+/* Pin positions from user-authored slots: pins on any of the four
+   edges at explicit grid slots. Shared by chips and the bus tools. */
+export function pinsFromSlots(slots: PinSlot[], names: (string | undefined)[], bits: number[], w: number, h: number): Pin[] {
+  const hu = Math.round(h / GRID), wu = Math.round(w / GRID);
+  return names.map((name, i) => {
+    const s = slots[i] ?? { side: 'L' as const, slot: i + 1, lx: 0, ly: 0 };
+    const p: Pin = s.side === 'T' || s.side === 'B'
+      ? { x: GRID * Math.max(0, Math.min(wu, s.slot)), y: s.side === 'T' ? -20 : h + 20 }
+      : { x: s.side === 'R' ? w + 20 : -20, y: GRID * Math.max(0, Math.min(hu, s.slot)) };
+    if (name) p.name = name;
+    if (bits[i] > 1) p.bits = bits[i];
+    return p;
+  });
+}
 
 export function chipGeom(def: ChipDef, ow?: number, oh?: number): CompGeom {
   const inBits = chipInputBits(def), outBits = chipOutputBits(def);
@@ -449,18 +481,11 @@ export function chipGeom(def: ChipDef, ow?: number, oh?: number): CompGeom {
     const L = def.layout;
     const w = Math.max(CHIP_MIN_W, Math.round((ow ?? L.w * GRID) / GRID) * GRID);
     const h = Math.max(GRID * 2, Math.round((oh ?? L.h * GRID) / GRID) * GRID);
-    const hu = Math.round(h / GRID), wu = Math.round(w / GRID);
-    const mk = (names: string[], bits: number[], slots: PinSlot[]): Pin[] =>
-      names.map((name, i) => {
-        const s = slots[i] ?? { side: 'L' as const, slot: i + 1, lx: 0, ly: 0 };
-        if (s.side === 'T' || s.side === 'B') {
-          const x = GRID * Math.max(0, Math.min(wu, s.slot));
-          return withBits({ x, y: s.side === 'T' ? -20 : h + 20, name }, bits[i]);
-        }
-        const x = s.side === 'R' ? w + 20 : -20;
-        return withBits({ x, y: GRID * Math.max(0, Math.min(hu, s.slot)), name }, bits[i]);
-      });
-    return { name: def.name, sub, w, h, ins: mk(def.inputs, inBits, L.ins), outs: mk(def.outputs, outBits, L.outs) };
+    return {
+      name: def.name, sub, w, h,
+      ins: pinsFromSlots(L.ins, def.inputs, inBits, w, h),
+      outs: pinsFromSlots(L.outs, def.outputs, outBits, w, h),
+    };
   }
 
   const rows = Math.max(def.inputs.length, def.outputs.length, 1);
@@ -492,6 +517,26 @@ export function defaultChipLayout(nIn: number, nOut: number, nameLen = 8): ChipL
   return { w, h, ins: mk(nIn, 'L'), outs: mk(nOut, 'R') };
 }
 
+/* The default pin layout a COMB/SPLIT starts from in the layout editor:
+   bit lines down one edge, the bus pin on the other. */
+export function busToolLayout(type: CompType, n: number): ChipLayout {
+  return type === 'COMB' ? defaultChipLayout(n, 1, 4) : defaultChipLayout(1, n, 4);
+}
+
+/* Keep a bus tool's custom layout in step when its bit count changes:
+   extra bit-line slots are appended on the tool's default edge, surplus
+   ones are dropped. */
+export function resizeBusLayout(layout: ChipLayout, type: CompType, n: number): ChipLayout {
+  const key = type === 'COMB' ? 'ins' : 'outs';
+  const side: PinSide = type === 'COMB' ? 'L' : 'R';
+  if (layout[key].length === n) return layout;
+  const next = cloneChipLayout(layout);
+  const list = next[key].slice(0, n);
+  while (list.length < n) list.push({ side, slot: Math.min(list.length + 1, layout.h), lx: 0, ly: 0 });
+  next[key] = list;
+  return next;
+}
+
 const bitRows = (n: number, h: number, x: number): Pin[] =>
   Array.from({ length: n }, (_, i) => ({ x, y: n === 1 ? midRow(h) : snapG(i * (h / (n - 1))) }));
 
@@ -501,7 +546,7 @@ const bitRows = (n: number, h: number, x: number): Pin[] =>
 export const pinPortW = (n: number) =>
   Math.max(40, Math.ceil((busTextChars(clampBits(n)) * 9 + 20) / GRID) * GRID);
 
-export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' | 'h'>, lib: ChipLib): CompGeom {
+export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' | 'h' | 'layout'>, lib: ChipLib): CompGeom {
   if (c.type === 'CHIP') {
     const def = c.chipId ? lib[c.chipId] : undefined;
     if (def) return chipGeom(def, c.w, c.h);
@@ -530,27 +575,37 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
     return base;
   }
 
-  if (c.type === 'COMB') {
-    // N one-bit inputs (MSB on top), one N-bit bus output
+  if (isBusToolType(c.type)) {
+    // COMB: N one-bit inputs (MSB on top) → one N-bit bus output.
+    // SPLIT: one N-bit bus input → N one-bit outputs (MSB on top).
+    // Both can be user-resized (c.w/c.h) and carry an optional custom
+    // pin layout placing every pin on any of the four edges.
+    const isComb = c.type === 'COMB';
     const n = clampBits(c.nIns ?? 4);
-    const h = Math.max(40, (n - 1) * GRID);
-    return {
-      ...PRIM.COMB, h,
-      ins: bitRows(n, h, -20),
-      outs: [{ x: 80, y: midRow(h), bits: n }],
-      sub: `${n} bits → bus`,
-    };
-  }
+    const base = PRIM[c.type as 'COMB' | 'SPLIT'];
+    const sub = isComb ? `${n} bits → bus` : `bus → ${n} bits`;
+    const bitNames = Array.from({ length: n }, (_, i) => bitWeightName(n, i));
+    const ones = bitNames.map(() => 1);
 
-  if (c.type === 'SPLIT') {
-    // One N-bit bus input, N one-bit outputs (MSB on top)
-    const n = clampBits(c.nIns ?? 4);
-    const h = Math.max(40, (n - 1) * GRID);
+    if (c.layout) {
+      const L = c.layout;
+      const w = Math.max(busToolMinW(c.type), Math.round((c.w ?? L.w * GRID) / GRID) * GRID);
+      const h = Math.max(GRID * 2, Math.round((c.h ?? L.h * GRID) / GRID) * GRID);
+      return {
+        ...base, sub, w, h,
+        ins: isComb ? pinsFromSlots(L.ins, bitNames, ones, w, h) : pinsFromSlots(L.ins, ['BUS'], [n], w, h),
+        outs: isComb ? pinsFromSlots(L.outs, [undefined], [n], w, h) : pinsFromSlots(L.outs, bitNames, ones, w, h),
+      };
+    }
+
+    const w = Math.max(busToolMinW(c.type), snapG(c.w ?? 0));
+    const h = Math.max(busToolMinH(c), snapG(c.h ?? 0));
+    const bits = bitRows(n, h, isComb ? -20 : w + 20).map((p, i) => ({ ...p, name: bitNames[i] }));
+    const bus: Pin = { x: isComb ? w + 20 : -20, y: midRow(h), bits: n, ...(isComb ? {} : { name: 'BUS' }) };
     return {
-      ...PRIM.SPLIT, h,
-      ins: [{ x: -20, y: midRow(h), bits: n, name: 'BUS' }],
-      outs: bitRows(n, h, 100),
-      sub: `bus → ${n} bits`,
+      ...base, sub, w, h,
+      ins: isComb ? bits : [bus],
+      outs: isComb ? [bus] : bits,
     };
   }
 
@@ -1013,6 +1068,68 @@ export function makeChipDef(name: string, board: Board, pkg?: ChipPackage): Chip
     wires,
     createdAt: Date.now(),
   };
+}
+
+/* ── chip-wide bit scaling ──────────────────────────────────────────
+   The width every bit-carrying part of a chip shares (gates, IPIN/OPIN
+   ports, VAL constants) — null when the chip mixes widths or has no
+   such parts. Drives the "Bits" control shown when a placed chip is
+   selected. */
+export function chipUniformBits(def: ChipDef): number | null {
+  let n: number | null = null;
+  for (const c of def.comps) {
+    if (!isGateType(c.type) && c.type !== 'IPIN' && c.type !== 'OPIN' && c.type !== 'VAL') continue;
+    const b = clampBits(c.bits ?? 1);
+    if (n === null) n = b;
+    else if (n !== b) return null;
+  }
+  return n;
+}
+
+/* Rescale a whole chip to an n-bit bus width: every gate, input/output
+   pin, and value constant inside takes width n, and wire widths are
+   re-seeded from the pins they touch (free-floating bus wires scale
+   too). Structural parts — memory cells, combiner/splitter bit counts,
+   and nested chips — are left alone. Returns a new sanitized def. */
+export function scaleChipDefBits(def: ChipDef, bits: number, lib: ChipLib): ChipDef {
+  const n = clampBits(bits);
+  const comps = def.comps.map((c): Comp => {
+    if (isGateType(c.type)) {
+      const { bits: _b, ...rest } = c;
+      return n > 1 ? { ...rest, bits: n } : rest;
+    }
+    if (c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'VAL') {
+      const out: Comp = { ...c, bits: n };
+      if (out.val != null) out.val = storeVal(maskVal(out.val, n));
+      return out;
+    }
+    return c;
+  });
+  const byId = new Map(comps.map(c => [c.id, c]));
+  const endBits = (e: WireEnd): number => {
+    if (!isPinEnd(e)) return 1;
+    const c = byId.get(e.comp);
+    if (!c) return 1;
+    const g = getGeom(c, lib);
+    return g[e.side === 'out' ? 'outs' : 'ins'][e.pin]?.bits ?? 1;
+  };
+  const wires = normalizeWires(def.wires).map(w => {
+    const out = cloneWire(w);
+    if ([w.a, w.b].some(e => isPinEnd(e))) {
+      const b = Math.max(endBits(w.a), endBits(w.b));
+      if (b > 1) out.bits = b; else delete out.bits;
+    } else if (out.bits) {
+      out.bits = n;
+    }
+    return out;
+  });
+  return sanitizeChipDef({
+    ...def,
+    comps,
+    wires,
+    inputBits: def.inputComps.map(id => clampBits(byId.get(id)?.bits ?? 1)),
+    outputBits: def.outputComps.map(id => clampBits(byId.get(id)?.bits ?? 1)),
+  });
 }
 
 export function chipUsedBy(chipId: string, lib: ChipLib): string | null {

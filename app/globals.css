@@ -68,6 +68,8 @@
 .side-btnrow{display:flex;gap:4px;background:#17171b;border:1px solid var(--panel-border);border-radius:8px;padding:3px}
 .side-btnrow button{flex:1;appearance:none;border:none;background:none;color:var(--text);padding:6px 0;border-radius:6px;font-size:12px;cursor:pointer;transition:background .12s}
 .side-btnrow button:hover{background:#2c2c33}.side-btnrow button.on{background:var(--accent);color:#fff}
+.side-btnrow input{flex:1.4;width:0;min-width:52px;border:none;background:#212127;border-radius:6px;padding:6px;text-align:center;color:var(--text);font-size:12px}
+.side-btnrow input:focus{outline:1px solid var(--accent)}
 .side-actions{display:flex;gap:8px;flex-wrap:wrap}.side-actions .tbtn{flex:1;text-align:center}
 .side-hint{font-size:11px;color:var(--muted);line-height:1.5;border-top:1px solid var(--panel-border);padding-top:10px;margin-top:auto}
 .tbtn.dangerfill{background:#c0392f;border-color:#c0392f;color:#fff}.tbtn.dangerfill:hover{background:#d64438}
