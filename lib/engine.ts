@@ -39,6 +39,7 @@ export const cloneWireEnd = (e: WireEnd): WireEnd =>
    displayed. */
 export interface Wire { id: string; a: WireEnd; b: WireEnd; via?: Vec[]; bits?: number }
 export const MAX_WIRE_BITS = 64;
+export const BINARY_VALUE_MAX_BITS = 8;
 export const clampBits = (n?: number) => {
   const v = Number.isFinite(n) ? n! : 1;
   return Math.min(MAX_WIRE_BITS, Math.max(1, Math.round(v)));
@@ -81,16 +82,16 @@ export const storeVal = (v: bigint): number | string =>
 export const maskVal = (v: BusVal | string | undefined, n: number): bigint =>
   toBigVal(v) & ((1n << BigInt(clampBits(n))) - 1n);
 
-/* Live readout text: full binary up to 4 bits, hex above that. */
+/* Live readout text: full binary up to BINARY_VALUE_MAX_BITS, hex above that. */
 export const formatBusValue = (v: BusVal | undefined, bits: number): string => {
   const width = clampBits(bits);
   const b = maskVal(v, width);
-  return width > 4
+  return width > BINARY_VALUE_MAX_BITS
     ? '0x' + b.toString(16).toUpperCase().padStart(Math.ceil(width / 4), '0')
     : b.toString(2).padStart(width, '0');
 };
 /* Character count of formatBusValue's output for an n-bit bus. */
-export const busTextChars = (n: number) => (n > 4 ? 2 + Math.ceil(n / 4) : n);
+export const busTextChars = (n: number) => (n > BINARY_VALUE_MAX_BITS ? 2 + Math.ceil(n / 4) : n);
 
 /* Older saves used directed { from: output pin, to: input pin } wires. */
 export function normalizeWires(list: unknown): Wire[] {
@@ -495,7 +496,7 @@ const bitRows = (n: number, h: number, x: number): Pin[] =>
   Array.from({ length: n }, (_, i) => ({ x, y: n === 1 ? midRow(h) : snapG(i * (h / (n - 1))) }));
 
 /* Body width for a port (IPIN/OPIN/VAL) that must show its value —
-   binary up to 4 bits, hex beyond. Grows with the text, always a grid
+   binary up to BINARY_VALUE_MAX_BITS, hex beyond. Grows with the text, always a grid
    multiple. */
 export const pinPortW = (n: number) =>
   Math.max(40, Math.ceil((busTextChars(clampBits(n)) * 9 + 20) / GRID) * GRID);

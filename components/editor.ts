@@ -515,7 +515,7 @@
         const bits = clampBits(w.bits);
         out += `<g><path class="wirehit" data-wire="${w.id}" d="${d}"/><path class="wire${bits > 1 ? ' bus' : ''}${hi ? ' hi' : ''}${selCls}" d="${d}"/></g>`;
         if (bits > 1) {
-          // live bus readout — binary up to 4 bits, hex beyond
+          // live bus readout: binary up to the engine threshold, hex beyond
           out += `<text class="buslabel${hi ? ' hi' : ''}" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 9}"
             text-anchor="middle">${formatBusValue(hi, bits)}</text>`;
         }

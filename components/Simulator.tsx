@@ -6,7 +6,7 @@ import {
   Board, ChipDef, ChipLib, ChipLayout, ChipPackage, ChipShape, CompType, Vec,
   PALETTE_ORDER, getGeom, chipBodyPath,
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
-  isMemoryType, isBusToolType, MAX_WIRE_BITS, clampBits,
+  isMemoryType, isBusToolType, MAX_WIRE_BITS, BINARY_VALUE_MAX_BITS, clampBits,
   chipPinSources, chipPinName, defaultChipLayout, cloneBoard, sanitizeChipDef,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
@@ -28,10 +28,11 @@ const LS_FOLDERS = 'latchwork.folders.v1'; // { [name]: { color?: hex } } — ke
 const PAL_MIN_W = 120, PAL_MAX_W = 420, PAL_DEF_W = 186;
 const clampPalW = (w: number) => Math.min(PAL_MAX_W, Math.max(PAL_MIN_W, Math.round(w)));
 
-/* Inspector value drafts: binary up to 4 bits, hex (no 0x prefix) beyond. */
+/* Inspector value drafts: binary up to BINARY_VALUE_MAX_BITS, hex (no 0x prefix) beyond. */
 const hexDigits = (bits: number) => Math.ceil(bits / 4);
+const useHexValue = (bits: number) => bits > BINARY_VALUE_MAX_BITS;
 const valDraftFor = (v: bigint, bits: number) =>
-  bits > 4 ? v.toString(16).toUpperCase().padStart(hexDigits(bits), '0') : v.toString(2).padStart(bits, '0');
+  useHexValue(bits) ? v.toString(16).toUpperCase().padStart(hexDigits(bits), '0') : v.toString(2).padStart(bits, '0');
 
 interface FolderMeta { color?: string }
 const FOLDER_COLORS = ['#0a84ff', '#30d158', '#ffd60a', '#ff9f0a', '#ff453a', '#ff375f', '#bf5af2', '#64d2ff'];
@@ -735,8 +736,8 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
 
   const onValueChange = (v: string) => {
     const bits = sel?.pinBits ?? 1;
-    if (bits > 4) {
-      // wide buses take hex — a 64-bit binary string is unreadable
+    if (useHexValue(bits)) {
+      // wide buses take hex because very long binary strings are unreadable
       const clean = v.replace(/[^0-9a-fA-F]/g, '').toUpperCase().slice(0, hexDigits(bits));
       setValDraft(clean);
       if (sel) apiRef.current!.setValue(sel.id, clean ? BigInt('0x' + clean) : 0n);
@@ -1217,20 +1218,20 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
 
                 {sel.kind === 'comp' && sel.val != null && (
                   <label className="side-field"
-                    title={(sel.pinBits ?? 1) > 4
+                    title={useHexValue(sel.pinBits ?? 1)
                       ? 'Hex value driven onto the bus'
                       : 'Binary value driven onto the bus (MSB first)'}>
-                    <span>Value{(sel.pinBits ?? 1) > 4 ? ' · hex' : ' · binary'}</span>
-                    <div className={'side-valwrap' + ((sel.pinBits ?? 1) > 4 ? ' hex' : '')}>
-                      {(sel.pinBits ?? 1) > 4 && <span className="valprefix mono" aria-hidden="true">0x</span>}
+                    <span>Value{useHexValue(sel.pinBits ?? 1) ? ' · hex' : ' · binary'}</span>
+                    <div className={'side-valwrap' + (useHexValue(sel.pinBits ?? 1) ? ' hex' : '')}>
+                      {useHexValue(sel.pinBits ?? 1) && <span className="valprefix mono" aria-hidden="true">0x</span>}
                       <input
                         className="mono"
                         type="text"
-                        inputMode={(sel.pinBits ?? 1) > 4 ? 'text' : 'numeric'}
+                        inputMode={useHexValue(sel.pinBits ?? 1) ? 'text' : 'numeric'}
                         value={valDraft}
                         placeholder="0"
-                        maxLength={(sel.pinBits ?? 1) > 4 ? hexDigits(sel.pinBits ?? 1) : (sel.pinBits ?? 1)}
-                        aria-label={(sel.pinBits ?? 1) > 4 ? 'Hex value' : 'Binary value'}
+                        maxLength={useHexValue(sel.pinBits ?? 1) ? hexDigits(sel.pinBits ?? 1) : (sel.pinBits ?? 1)}
+                        aria-label={useHexValue(sel.pinBits ?? 1) ? 'Hex value' : 'Binary value'}
                         onChange={e => onValueChange(e.target.value)}
                       />
                     </div>
