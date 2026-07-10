@@ -13,7 +13,7 @@ const midRow = (h: number) => snapG(h / 2);
    TUN  = tunnel (named wireless net link). */
 export type CompType =
   | 'IN' | 'BTN' | 'ONE' | 'CLK' | 'VAL'
-  | 'SRLATCH' | 'DLATCH' | 'JKFF' | 'DFF' | 'SRFF' | 'TFF'
+  | 'SRLATCH' | 'DLATCH' | 'JKFF' | 'DFF' | 'SRFF' | 'TFF' | 'SHIFT'
   | GateType
   | 'OUT' | 'SSEG' | 'COMB' | 'SPLIT' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP';
 export type EdgeMode = 'rise' | 'fall';
@@ -400,6 +400,11 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
     ins: [{ x: -20, y: 20, name: 'T' }, { x: -20, y: 40, name: 'CLK' }],
     outs: [{ x: 110, y: 20, name: 'Q' }, { x: 110, y: 40, name: 'Q̄' }],
   },
+  SHIFT: {
+    name: 'Shift Register', sub: 'serial in, parallel out', w: 120, h: 60,
+    ins: [{ x: -20, y: 20, name: 'D' }, { x: -20, y: 40, name: 'CLK' }],
+    outs: [{ x: 140, y: 20, name: 'Q' }, { x: 140, y: 40, name: 'SO' }],
+  },
   OUT: { name: 'LED', sub: 'output', w: 40, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
   SSEG: {
     name: '7-Segment', sub: 'digit display', w: 100, h: 160,
@@ -425,7 +430,7 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
 export const PALETTE_ORDER: [string, CompType[]][] = [
   ['Input', ['IN', 'BTN', 'ONE', 'VAL', 'CLK']],
   ['Gates', [...GATE_TYPES]],
-  ['Memory', ['JKFF', 'SRLATCH', 'DLATCH', 'DFF', 'SRFF', 'TFF']],
+  ['Memory', ['JKFF', 'SRLATCH', 'DLATCH', 'DFF', 'SRFF', 'TFF', 'SHIFT']],
   ['Output', ['OUT', 'SSEG']],
   ['Bus & routing', ['COMB', 'SPLIT', 'TUN']],
   ['Chip pins', ['IPIN', 'OPIN']],
@@ -613,14 +618,17 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
     // Memory cells store whole buses: data pins (S/R, D, J/K, T) and the
     // Q/Q̄ outputs share the cell's width; CLK and EN stay 1-bit controls.
     // The body widens so the live Q readout fits.
+    // The shift register is the exception: `bits` is its stage count, D
+    // and SO stay 1-bit serial lines, and only the parallel Q bus widens.
     const base = PRIM[c.type];
     const n = clampBits(c.bits ?? 1);
     if (n === 1) return base;
     const w = Math.max(base.w, Math.ceil((busTextChars(n) * 8 + 32) / GRID) * GRID);
-    const widen = (p: Pin): Pin => (MEMORY_CONTROL_PINS.has(p.name ?? '') ? { ...p } : { ...p, bits: n });
+    const widen = (p: Pin): Pin =>
+      (MEMORY_CONTROL_PINS.has(p.name ?? '') || (c.type === 'SHIFT' && p.name !== 'Q') ? { ...p } : { ...p, bits: n });
     return {
       ...base,
-      sub: `${base.sub} · ${n}-bit`,
+      sub: c.type === 'SHIFT' ? `${n}-stage serial → parallel` : `${base.sub} · ${n}-bit`,
       w,
       ins: base.ins.map(widen),
       outs: base.outs.map(p => ({ ...widen(p), x: w + 20 })),
@@ -643,15 +651,15 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
 }
 
 const bit = (v: BusVal | undefined) => (v ? 1 : 0);
-const MEMORY_TYPES: ReadonlySet<CompType> = new Set(['SRLATCH', 'DLATCH', 'JKFF', 'DFF', 'SRFF', 'TFF']);
+const MEMORY_TYPES: ReadonlySet<CompType> = new Set(['SRLATCH', 'DLATCH', 'JKFF', 'DFF', 'SRFF', 'TFF', 'SHIFT']);
 /* Memory pins that stay 1-bit controls no matter the cell's data width. */
 const MEMORY_CONTROL_PINS: ReadonlySet<string> = new Set(['CLK', 'EN']);
-const EDGE_MEMORY_TYPES: ReadonlySet<CompType> = new Set(['JKFF', 'DFF', 'SRFF', 'TFF']);
+const EDGE_MEMORY_TYPES: ReadonlySet<CompType> = new Set(['JKFF', 'DFF', 'SRFF', 'TFF', 'SHIFT']);
 export const isMemoryType = (type: CompType) => MEMORY_TYPES.has(type);
 export const defaultEdgeForComp = (c: Pick<Comp, 'type' | 'edge'>): EdgeMode | undefined => {
   if (c.edge === 'rise' || c.edge === 'fall') return c.edge;
   if (c.type === 'JKFF' || c.type === 'TFF') return 'fall';
-  if (c.type === 'DFF' || c.type === 'SRFF') return 'rise';
+  if (c.type === 'DFF' || c.type === 'SRFF' || c.type === 'SHIFT') return 'rise';
   return undefined;
 };
 
@@ -718,6 +726,14 @@ function evalMemory(c: Comp, g: CompGeom, ins: bigint[], state: SimState, edgeFi
     case 'TFF':
       if (memoryTriggered(c, g, ins, state, edgeFired)) q ^= ins[0] & mask;
       return memoryOut(q, mask);
+
+    /* SIPO shift register — an n-stage chain of D flip-flops sharing one
+       clock. Each active edge shifts D into the LSB and every stage one
+       position toward the MSB; Q exposes all n stages in parallel and SO
+       (the MSB, the oldest bit) lets registers cascade into longer ones. */
+    case 'SHIFT':
+      if (memoryTriggered(c, g, ins, state, edgeFired)) q = ((q << 1n) | (ins[0] & 1n)) & mask;
+      return [q, (q >> BigInt(n - 1)) & 1n];
 
     default:
       return [];
