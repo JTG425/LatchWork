@@ -6,8 +6,9 @@ import {
   Board, ChipDef, ChipLib, ChipLayout, ChipPackage, ChipShape, CompType, Vec,
   PALETTE_ORDER, getGeom, chipBodyPath,
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
-  isMemoryType, isBusToolType, MAX_WIRE_BITS, BINARY_VALUE_MAX_BITS, clampBits,
+  isMemoryType, isBusToolType, MAX_WIRE_BITS, MAX_GATE_INS, BINARY_VALUE_MAX_BITS, clampBits,
   chipPinSources, chipPinName, defaultChipLayout, cloneBoard, sanitizeChipDef,
+  busToolLayout, bitWeightName, chipUniformBits, scaleChipDefBits,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
@@ -213,6 +214,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const [editAsk, setEditAsk] = useState<ChipDef | null>(null);
   const [deleteAsk, setDeleteAsk] = useState<ChipDef | null>(null);
   const [peek, setPeek] = useState<{ compId: string; chipId: string } | null>(null);
+  const [busEdit, setBusEdit] = useState<{ id: string; type: 'COMB' | 'SPLIT'; nIns: number; layout: ChipLayout } | null>(null);
   const [folderMenu, setFolderMenu] = useState<string | null>(null);
   const [newFolder, setNewFolder] = useState('');
   const [query, setQuery] = useState('');
@@ -374,6 +376,20 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     setPeek({ compId, chipId });
   }, []);
 
+  /* Double-click on a combiner/splitter → rearrange its pins & size. */
+  const openBusEdit = useCallback((compId: string) => {
+    const board = apiRef.current!.getBoard();
+    const c = board.comps.find(x => x.id === compId);
+    if (!c || !isBusToolType(c.type)) return;
+    const n = clampBits(c.nIns ?? 4);
+    setBusEdit({
+      id: compId,
+      type: c.type as 'COMB' | 'SPLIT',
+      nIns: n,
+      layout: c.layout ?? busToolLayout(c.type, n),
+    });
+  }, []);
+
   /* ── mount: editor, then chips, then tabs/boards ── */
   useEffect(() => {
     const ed = createEditor(svgRef.current!, {
@@ -389,6 +405,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
       onPlacing: setArmed,
       onWireTool: setWireTool,
       onChipDblClick: openPeek,
+      onBusToolDblClick: openBusEdit,
       onBoardChange: () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(() => {
@@ -554,6 +571,18 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
     notify(`Updated the “${updated.name}” package — every placed copy uses it.`);
     return updated;
   }, [setChips, notify]);
+
+  /* Chip-wide bit scaling from the inspector: every gate, pin, value,
+     and wire inside the chip definition takes the new bus width. */
+  const applyChipBits = useCallback((chipId: string, n: number) => {
+    const cur = chipsRef.current[chipId];
+    if (!cur) return;
+    const scaled = scaleChipDefBits(cur, n, chipsRef.current);
+    setChips(Object.values(chipsRef.current).map(c => (c.id === chipId ? scaled : c))
+      .sort((a, b) => a.createdAt - b.createdAt));
+    // wires on the canvas that touch this chip's pins pick up the new widths
+    apiRef.current!.refreshWireBits();
+  }, [setChips]);
 
   const requestDeleteChip = (def: ChipDef) => {
     const usedBy = chipUsedBy(def.id, chipsRef.current);
@@ -1239,7 +1268,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                 )}
 
                 {sel.kind === 'comp' && sel.nIns != null && (!sel.type || !isBusToolType(sel.type)) && (
-                  <div className="side-field" title="Number of inputs">
+                  <div className="side-field" title={`Number of input lines (2–${MAX_GATE_INS})`}>
                     <span>Inputs</span>
                     <div className="side-btnrow" id="ningrp">
                       {[2, 3, 4].map(n => (
@@ -1250,6 +1279,16 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                           onClick={() => api().setNumInputs(sel.id, n)}
                         >{n}</button>
                       ))}
+                      <input
+                        className="mono"
+                        type="number"
+                        min={2}
+                        max={MAX_GATE_INS}
+                        step={1}
+                        value={sel.nIns}
+                        aria-label="Number of input lines"
+                        onChange={e => api().setNumInputs(sel.id, e.target.valueAsNumber)}
+                      />
                     </div>
                   </div>
                 )}
@@ -1286,6 +1325,27 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
                       value={freqDraft}
                       aria-label="Clock frequency in hertz"
                       onChange={e => onFreqChange(e.target.value)}
+                    />
+                  </label>
+                )}
+
+                {sel.kind === 'comp' && sel.type === 'CHIP' && sel.chipId && lib[sel.chipId] && (
+                  <label className="side-field"
+                    title="Scale the whole chip to this bus width — every gate, pin, value, and wire inside the chip changes bit length (applies to all placed copies)">
+                    <span>Bits · all internals</span>
+                    <input
+                      className="mono"
+                      type="number"
+                      min={1}
+                      max={MAX_WIRE_BITS}
+                      step={1}
+                      value={chipUniformBits(lib[sel.chipId]) ?? ''}
+                      placeholder="mixed"
+                      aria-label="Bus width for every component inside the chip"
+                      onChange={e => {
+                        const n = e.target.valueAsNumber;
+                        if (Number.isFinite(n) && n >= 1 && n <= MAX_WIRE_BITS) applyChipBits(sel.chipId!, n);
+                      }}
                     />
                   </label>
                 )}
@@ -1461,6 +1521,42 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
             <div className="dialog-actions">
               <button className="tbtn" autoFocus onClick={() => setDeleteAsk(null)}>Cancel</button>
               <button className="tbtn dangerfill" onClick={confirmDeleteChip}>Delete chip</button>
+            </div>
+          </Modal>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {busEdit && (
+          <Modal key="busedit" className="savechipdialog"
+            label={`${busEdit.type === 'COMB' ? 'Bit combiner' : 'Splitter'} — pins & size`}
+            onDismiss={() => setBusEdit(null)}>
+            <h2>{busEdit.type === 'COMB' ? 'Bit combiner' : 'Splitter'} pins</h2>
+            <p>
+              Drag pins to any edge to reassign their locations, drag labels to nudge names,
+              and use the size buttons to resize the body — just like a custom chip.
+            </p>
+            <PinLayoutEditor
+              inputs={busEdit.type === 'COMB'
+                ? Array.from({ length: busEdit.nIns }, (_, i) => ({ name: bitWeightName(busEdit.nIns, i), bits: 1 }))
+                : [{ name: 'BUS', bits: busEdit.nIns }]}
+              outputs={busEdit.type === 'COMB'
+                ? [{ name: 'BUS', bits: busEdit.nIns }]
+                : Array.from({ length: busEdit.nIns }, (_, i) => ({ name: bitWeightName(busEdit.nIns, i), bits: 1 }))}
+              name={busEdit.type === 'COMB' ? 'COMBINE' : 'SPLIT'}
+              layout={busEdit.layout}
+              onChange={l => setBusEdit({ ...busEdit, layout: l })}
+            />
+            <div className="dialog-actions">
+              <button className="tbtn"
+                onClick={() => setBusEdit({ ...busEdit, layout: busToolLayout(busEdit.type, busEdit.nIns) })}
+                title="Put the pins back in their default positions">Reset layout</button>
+              <div className="spacer" />
+              <button className="tbtn" onClick={() => setBusEdit(null)}>Cancel</button>
+              <button className="tbtn primary"
+                onClick={() => { api().setBusLayout(busEdit.id, busEdit.layout); setBusEdit(null); }}>
+                Apply
+              </button>
             </div>
           </Modal>
         )}

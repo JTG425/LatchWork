@@ -14,7 +14,7 @@
 
 import {
   Comp, Wire, WireEnd, Vec, ChipDef, ChipLib, SimState,
-  getGeom, chipGeom, isPinEnd, isAttachEnd, isMemoryType, defaultEdgeForComp,
+  getGeom, chipGeom, isPinEnd, isAttachEnd, isMemoryType, isBusToolType, defaultEdgeForComp,
   clampBits, maskVal, formatBusValue, chipLabelOffset, chipBodyPath, analyzeNets, tunnelPinGroups,
   wireRouteCorners, wireCornerPath, wireEndFacing, SEG_NAMES,
 } from './engine';
@@ -60,7 +60,7 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
   let inner = '', stubs = '', pins = '';
   // stub target on the body edge — chips may carry pins on any edge
   const stubEnd = (p: Vec, out: boolean): Vec => {
-    if (c.type === 'CHIP') {
+    if (c.type === 'CHIP' || isBusToolType(c.type)) {
       if (p.y < 0) return { x: p.x, y: 8 };
       if (p.y > g.h) return { x: p.x, y: g.h - 8 };
       return { x: p.x < 0 ? 8 : g.w - 8, y: p.y };
@@ -156,20 +156,28 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
     inner = `<path class="body tunnelbody${lit ? ' hi' : ''}" d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z"/>
       <text class="tunnelname" x="46" y="24"${ctr(46, 20)}>${esc(c.label?.trim() || '?')}</text>` +
       caption('TUNNEL', 40, 52);
-  } else if (c.type === 'COMB') {
-    const n = g.ins.length;
-    const v = lv ? maskVal(outV(0), n) : 0n;
-    inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-      <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${formatBusValue(v, n)}</text>` +
-      caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
-  } else if (c.type === 'SPLIT') {
-    const n = g.outs.length;
-    const v = lv ? maskVal(inV(0), n) : 0n;
+  } else if (isBusToolType(c.type)) {
+    const isComb = c.type === 'COMB';
+    const n = clampBits(c.nIns ?? 4);
+    const v = lv ? maskVal(isComb ? outV(0) : inV(0), n) : 0n;
     inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
       <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${formatBusValue(v, n)}</text>`;
-    g.ins.forEach(p => { inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`; });
-    g.outs.forEach((p, i) => { inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>2${n - 1 - i}</text>`; });
-    inner += caption(c.label || 'SPLIT', g.w / 2, g.h + 14);
+    // edge-aware pin labels (pins may sit on any edge with a custom layout)
+    const pinLabel = (p: Vec & { name?: string }, i: number, side: 'in' | 'out') => {
+      if (!p.name) return '';
+      const s = c.layout?.[side === 'in' ? 'ins' : 'outs']?.[i];
+      const lx = s?.lx ?? 0, ly = s?.ly ?? 0;
+      if (p.y < 0 || p.y > g.h) {
+        const by = p.y < 0 ? 13 : g.h - 7;
+        return `<text class="pinname" x="${p.x + lx}" y="${by + ly}" text-anchor="middle"${ctr(p.x, by)}>${esc(p.name)}</text>`;
+      }
+      const left = p.x < 0;
+      const bx = left ? 8 : g.w - 8;
+      return `<text class="pinname" x="${bx + lx}" y="${p.y + 3 + ly}" text-anchor="${left ? 'start' : 'end'}"${ctr(bx, p.y)}>${esc(p.name)}</text>`;
+    };
+    g.ins.forEach((p, i) => { inner += pinLabel(p, i, 'in'); });
+    g.outs.forEach((p, i) => { inner += pinLabel(p, i, 'out'); });
+    inner += caption(c.label || (isComb ? 'COMBINE' : 'SPLIT'), g.w / 2, g.h + 14);
   } else if (isMemoryType(c.type)) {
     const edge = defaultEdgeForComp(c);
     const q = lv ? (outV(0) ? 1 : 0) : 0;

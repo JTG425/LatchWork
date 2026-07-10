@@ -7,6 +7,7 @@
 
    import {
     GRID, Comp, Wire, WireEnd, PinEnd, Vec, Board, ChipLib, CompType, EdgeMode,
+    ChipLayout, cloneChipLayout, resizeBusLayout, busToolMinW, busToolMinH,
     SimState, newSimState, getGeom, evaluateNet, analyzeNets,
     normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
     MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, CHIP_MIN_W, chipMinH,
@@ -46,6 +47,8 @@
     onWireTool?(on: boolean): void;
     /* double-click on a placed chip — Simulator opens the live peek popup */
     onChipDblClick?(compId: string, chipId: string): void;
+    /* double-click on a combiner/splitter — Simulator opens its pin-layout editor */
+    onBusToolDblClick?(compId: string): void;
   }
 
   export interface EditorApi {
@@ -66,6 +69,11 @@
     setFreq(id: string, hz: number): void;
     setEdge(id: string, edge: EdgeMode | null): void;
     setWireBits(id: string, bits: number): void;
+    /* COMB/SPLIT: apply a custom pin layout (pins on any edge + body size) */
+    setBusLayout(id: string, layout: ChipLayout): void;
+    /* re-seed every wire's bus width from the pins it touches — call after
+       a chip definition's pin widths change */
+    refreshWireBits(): void;
     getBoard(): Board;
     setBoard(b: Board): void;
     removeChipInstances(chipId: string): void;
@@ -108,8 +116,6 @@
   const esc = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-  const SUPS = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
-  const sup = (n: number) => String(n).split('').map(d => SUPS[+d] ?? d).join('');
   const edgeText = (c: Pick<Comp, 'edge'>) => c.edge === 'rise' ? ' / rise' : c.edge === 'fall' ? ' / fall' : '';
 
   export function createEditor(svg: SVGSVGElement, cb: EditorCallbacks): EditorApi {
@@ -306,7 +312,7 @@
       // Stubs may end slightly inside the body; overshoot hides under
       // the fill (stubs render before the body).
       const stubEnd = (p: Vec, out: boolean): Vec => {
-        if (c.type === 'CHIP') {
+        if (c.type === 'CHIP' || isBusToolType(c.type)) {
           if (p.y < 0) return { x: p.x, y: 8 };
           if (p.y > g.h) return { x: p.x, y: g.h - 8 };
           return { x: p.x < 0 ? 8 : g.w - 8, y: p.y };
@@ -424,28 +430,28 @@
         inner = `<path class="body tunnelbody${lit ? ' hi' : ''}" d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z"/>
           <text class="tunnelname${c.label?.trim() ? '' : ' unset'}" x="46" y="24"${ctr(46, 20)}>${esc(c.label?.trim() || 'name?')}</text>` +
           caption('TUNNEL', 40, 52);
-      } else if (c.type === 'COMB') {
-        const n = g.ins.length;
-        const v = maskVal(sim.vals[c.id + ':0'], n);
+      } else if (isBusToolType(c.type)) {
+        const isComb = c.type === 'COMB';
+        const n = clampBits(c.nIns ?? 4);
+        const v = maskVal(isComb ? sim.vals[c.id + ':0'] : (c._ins?.[0] ?? 0), n);
         inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
           <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${formatBusValue(v, n)}</text>`;
-        g.ins.forEach((p, i) => {
-          // MSB on top: label each pin with its bit weight
-          inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>2${sup(n - 1 - i)}</text>`;
-        });
-        inner += caption(c.label || 'COMBINE', g.w / 2, g.h + 14);
-      } else if (c.type === 'SPLIT') {
-        const n = g.outs.length;
-        const v = maskVal(c._ins?.[0] ?? 0, n);
-        inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="8"/>
-          <text class="combval" x="${g.w / 2}" y="${g.h / 2 + 4}"${ctr(g.w / 2, g.h / 2)}>${formatBusValue(v, n)}</text>`;
-        g.ins.forEach(p => {
-          inner += `<text class="pinname" x="8" y="${p.y + 3}" text-anchor="start"${ctr(8, p.y)}>${esc(p.name || '')}</text>`;
-        });
-        g.outs.forEach((p, i) => {
-          inner += `<text class="pinname" x="${g.w - 8}" y="${p.y + 3}" text-anchor="end"${ctr(g.w - 8, p.y)}>2${sup(n - 1 - i)}</text>`;
-        });
-        inner += caption(c.label || 'SPLIT', g.w / 2, g.h + 14);
+        // edge-aware pin labels (pins may sit on any edge with a custom layout)
+        const pinLabel = (p: Vec & { name?: string }, i: number, side: 'in' | 'out') => {
+          if (!p.name) return '';
+          const s = c.layout?.[side === 'in' ? 'ins' : 'outs']?.[i];
+          const lx = s?.lx ?? 0, ly = s?.ly ?? 0;
+          if (p.y < 0 || p.y > g.h) {
+            const by = p.y < 0 ? 13 : g.h - 7;
+            return `<text class="pinname" x="${p.x + lx}" y="${by + ly}" text-anchor="middle"${ctr(p.x, by)}>${esc(p.name)}</text>`;
+          }
+          const left = p.x < 0;
+          const bx = left ? 8 : g.w - 8;
+          return `<text class="pinname" x="${bx + lx}" y="${p.y + 3 + ly}" text-anchor="${left ? 'start' : 'end'}"${ctr(bx, p.y)}>${esc(p.name)}</text>`;
+        };
+        g.ins.forEach((p, i) => { inner += pinLabel(p, i, 'in'); });
+        g.outs.forEach((p, i) => { inner += pinLabel(p, i, 'out'); });
+        inner += caption(c.label || (isComb ? 'COMBINE' : 'SPLIT'), g.w / 2, g.h + 14);
       } else if (isMemoryType(c.type)) {
         const edge = defaultEdgeForComp(c);
         const q = sim.vals[c.id + ':0'] ? 1 : 0;
@@ -485,7 +491,7 @@
       const core = stubs + inner + pins;
       const rotated = rot ? `<g transform="${rotTransform(rot, g.w, g.h)}">${core}</g>` : core;
       let extra = '';
-      if (c.type === 'CHIP' && selected) {
+      if ((c.type === 'CHIP' || isBusToolType(c.type)) && selected) {
         // corner grip lives in footprint space so it's always bottom-right
         const f = footprint(rot, g.w, g.h);
         extra = `<path class="resizegrip" d="M${f.w - 13},${f.h - 2} L${f.w - 2},${f.h - 13} M${f.w - 8},${f.h - 2} L${f.w - 2},${f.h - 8}"/>
@@ -854,6 +860,7 @@
         if (compEl) {
           const c = find((compEl as SVGElement).dataset.comp!);
           if (c && c.type === 'CHIP' && c.chipId) cb.onChipDblClick?.(c.id, c.chipId);
+          else if (c && isBusToolType(c.type)) cb.onBusToolDblClick?.(c.id);
         }
         return;
       }
@@ -879,14 +886,20 @@
       if (resize) {
         const c = find(resize.id);
         if (!c) { resize = null; return; }
-        const def = c.chipId ? lib()[c.chipId] : undefined;
-        const minH = def ? chipMinH(def) : GRID * 2;
+        let minW = CHIP_MIN_W, minH = GRID * 2;
+        if (c.type === 'CHIP') {
+          const def = c.chipId ? lib()[c.chipId] : undefined;
+          if (def) minH = chipMinH(def);
+        } else if (isBusToolType(c.type)) {
+          minW = busToolMinW(c.type);
+          minH = busToolMinH(c);
+        }
         const fw = snap(pt.x - c.x), fh = snap(pt.y - c.y);
         if ((c.rot ?? 0) & 1) {
           c.h = Math.max(minH, fw);
-          c.w = Math.max(CHIP_MIN_W, fh);
+          c.w = Math.max(minW, fh);
         } else {
-          c.w = Math.max(CHIP_MIN_W, fw);
+          c.w = Math.max(minW, fw);
           c.h = Math.max(minH, fh);
         }
         refresh(false);
@@ -1112,6 +1125,8 @@
         const c = find(id);
         if (!c || !(MULTI_IN_GATES.has(c.type) || isBusToolType(c.type))) return;
         c.nIns = MULTI_IN_GATES.has(c.type) ? clampGateIns(n) : clampBits(n);
+        // a custom bus-tool layout tracks the new bit count
+        if (isBusToolType(c.type) && c.layout) c.layout = resizeBusLayout(c.layout, c.type, c.nIns);
         const g = getGeom(c, lib());
         wires = wires.filter(w => ![w.a, w.b].some(e =>
           isPinEnd(e) && e.comp === id && e.pin >= g[e.side === 'out' ? 'outs' : 'ins'].length));
@@ -1167,6 +1182,23 @@
         const b = clampBits(bits);
         if (b > 1) w.bits = b; else delete w.bits;
         if (selWire === id) emitSel();
+        refresh();
+      },
+      setBusLayout(id, layout) {
+        const c = find(id);
+        if (!c || !isBusToolType(c.type)) return;
+        c.layout = cloneChipLayout(layout);
+        c.w = layout.w * GRID;
+        c.h = layout.h * GRID;
+        refresh();
+      },
+      refreshWireBits() {
+        for (const w of wires) {
+          if (![w.a, w.b].some(e => isPinEnd(e))) continue;
+          const b = Math.max(pinBits(w.a), pinBits(w.b));
+          if (b > 1) w.bits = b;
+          else if (w.bits && [w.a, w.b].every(e => isPinEnd(e))) delete w.bits;
+        }
         refresh();
       },
       getBoard(): Board {
