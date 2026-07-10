@@ -14,11 +14,9 @@ import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
 import PinLayoutEditor, { LayoutPin } from '@/components/PinLayoutEditor';
 import PeekDialog, { ChipPackageEditor } from '@/components/PeekDialog';
-import AuthDialog from '@/components/AuthDialog';
 import CommunityDialog from '@/components/CommunityDialog';
 import ChipAnalysis, { ChipPreview } from '@/components/ChipAnalysis';
 import LogoMark from '@/components/Logo';
-import { AuthPublicConfig } from '@/lib/auth-embedded';
 
 const LS_BOARD = 'latchwork.board.v1';   // legacy single-board key, migrated into tabs
 const LS_CHIPS = 'latchwork.chips.v1';
@@ -182,7 +180,7 @@ function Modal({ children, onDismiss, className, label }: {
   );
 }
 
-export default function Simulator({ user, auth }: { user: SimUser | null; auth: AuthPublicConfig | null }) {
+export default function Simulator({ user, authEnabled }: { user: SimUser | null; authEnabled: boolean }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const apiRef = useRef<EditorApi | null>(null);
   const chipsRef = useRef<ChipLib>({});
@@ -208,7 +206,6 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
   const [chipShape, setChipShape] = useState<ChipShape>('rect');
   const [chipShapePts, setChipShapePts] = useState<Vec[] | undefined>(undefined);
   const [toast, setToast] = useState<string | null>(null);
-  const [authOpen, setAuthOpen] = useState(false);
   const [communityOpen, setCommunityOpen] = useState(false);
   const [inspect, setInspect] = useState<ChipDef | null>(null);
   const [editAsk, setEditAsk] = useState<ChipDef | null>(null);
@@ -942,8 +939,8 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
           : <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>}
         {user
           ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a>
-          : auth
-            ? <button className="tbtn ghostbtn" onClick={() => setAuthOpen(true)}>Sign in</button>
+          : authEnabled
+            ? <a className="tbtn ghostbtn" href="/auth/login">Sign in</a>
             : null}
         </div>
       </div>
@@ -1425,7 +1422,7 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         <span><kbd>W</kbd> wire tool: start at any dot, split wires · click a dot twice to end in air</span>
         <span><kbd>R</kbd> rotate · drag empty space to <b>select</b> · <kbd>⌘/⌃</kbd><kbd>C</kbd>/<kbd>V</kbd> copy &amp; paste</span>
         <span><kbd>⌫</kbd> delete · <kbd>esc</kbd> cancel · scroll to pan · <kbd>ctrl</kbd>+scroll to zoom · <kbd>space</kbd>+drag or middle-drag to pan</span>
-        <span>{user ? 'Chips sync to your account' : auth ? 'Chips save to this browser — sign in to sync' : 'Chips save to this browser'}</span>
+        <span>{user ? 'Chips sync to your account' : authEnabled ? 'Chips save to this browser — sign in to sync' : 'Chips save to this browser'}</span>
       </div>
 
       {drag && (
@@ -1442,14 +1439,12 @@ export default function Simulator({ user, auth }: { user: SimUser | null; auth: 
         </div>
       )}
 
-      {authOpen && auth && <AuthDialog auth={auth} onClose={() => setAuthOpen(false)} />}
-
       {communityOpen && (
         <CommunityDialog
           user={user}
           chips={chips}
           onAdd={addCommunityChips}
-          onSignIn={() => auth ? setAuthOpen(true) : notify('Sign-in is not configured for this deployment.')}
+          onSignIn={() => authEnabled ? window.location.assign('/auth/login') : notify('Sign-in is not configured for this deployment.')}
           onClose={() => setCommunityOpen(false)}
           notify={notify}
         />

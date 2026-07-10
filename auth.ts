@@ -7,7 +7,6 @@ export const authEnv = {
   clientId: process.env.AUTH0_CLIENT_ID,
   clientSecret: process.env.AUTH0_CLIENT_SECRET,
   secret: process.env.AUTH0_SECRET,
-  connection: process.env.AUTH0_CONNECTION || 'Username-Password-Authentication',
 };
 
 export const authConfigured = Boolean(
