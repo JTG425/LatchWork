@@ -660,6 +660,7 @@
       };
       if (placing.type === 'IN' || placing.type === 'IPIN') c.on = false;
       if (placing.type === 'VAL') { c.bits = 4; c.val = 0; }
+      if (placing.type === 'SHIFT') c.bits = 8;
       if (placing.type === 'CLK') c.freq = 1;
       if (isBusToolType(placing.type)) c.nIns = 4;
       const edge = defaultEdgeForComp(c);

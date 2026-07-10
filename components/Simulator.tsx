@@ -1227,10 +1227,12 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
                   <label className="side-field"
                     title={sel.type && isGateType(sel.type)
                       ? `Operand width — the gate applies its logic bitwise across buses up to ${MAX_WIRE_BITS} bits`
-                      : sel.type && isMemoryType(sel.type)
-                        ? `Data width — the cell stores an N-bit bus (up to ${MAX_WIRE_BITS}); clock/enable stay 1-bit`
-                        : 'Pin bus width — how many bits this pin carries'}>
-                    <span>Bits</span>
+                      : sel.type === 'SHIFT'
+                        ? `Stages — each clock edge shifts D in; Q is the N-bit parallel output (up to ${MAX_WIRE_BITS})`
+                        : sel.type && isMemoryType(sel.type)
+                          ? `Data width — the cell stores an N-bit bus (up to ${MAX_WIRE_BITS}); clock/enable stay 1-bit`
+                          : 'Pin bus width — how many bits this pin carries'}>
+                    <span>{sel.type === 'SHIFT' ? 'Stages' : 'Bits'}</span>
                     <input
                       className="mono"
                       type="number"
@@ -1239,7 +1241,8 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
                       step={1}
                       value={sel.pinBits}
                       aria-label={sel.type && isGateType(sel.type) ? 'Gate operand width'
-                        : sel.type && isMemoryType(sel.type) ? 'Memory data width' : 'Pin bus width'}
+                        : sel.type === 'SHIFT' ? 'Shift register stages'
+                          : sel.type && isMemoryType(sel.type) ? 'Memory data width' : 'Pin bus width'}
                       onChange={e => onPinBitsChange(e.target.valueAsNumber)}
                     />
                   </label>
