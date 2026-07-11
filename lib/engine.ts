@@ -1,4 +1,5 @@
 import { GATE_DEFS, GATE_TYPES, GateType, isGateType } from './gates';
+import { compileVhdl, evalVhdlModule, VhdlModule } from './vhdl';
 
 export const GRID = 20;
 const snapG = (v: number) => Math.round(v / GRID) * GRID;
@@ -57,6 +58,7 @@ export interface Comp {
   freq?: number;          // CLK: full cycles per second
   edge?: EdgeMode;         // gates/chips: update only on this clock edge
   clockPin?: number;       // optional explicit clock input index
+  probe?: boolean;         // plot this component's signal in the timing diagram
   _ins?: bigint[];
 }
 
@@ -314,9 +316,62 @@ export interface ChipDef {
   shape?: ChipShape;      // package silhouette (default 'rect')
   shapePts?: Vec[];       // 'custom' shape polygon, normalized 0..1
   folder?: string;        // palette folder ("My chips" grouping)
+  /* VHDL module source. When present the chip has no internal circuit —
+     comps/wires stay empty and evalChip runs the compiled module
+     (lib/vhdl.ts) instead of simulating a netlist. */
+  vhdl?: string;
   comps: Comp[];
   wires: Wire[];
   createdAt: number;
+}
+
+export const isVhdlChip = (def: Pick<ChipDef, 'vhdl'>): boolean => typeof def.vhdl === 'string';
+
+/* Compiled-module cache keyed by source text. A null entry records a
+   source that failed to compile so bad saves don't recompile per pass. */
+const vhdlModuleCache = new Map<string, VhdlModule | null>();
+export function compiledVhdl(src: string): VhdlModule | null {
+  let m = vhdlModuleCache.get(src);
+  if (m === undefined) {
+    const r = compileVhdl(src);
+    m = r.ok ? r.module : null;
+    if (vhdlModuleCache.size > 128) vhdlModuleCache.clear();
+    vhdlModuleCache.set(src, m);
+  }
+  return m;
+}
+
+/* Build the library ChipDef for a compiled VHDL module. Pins come from
+   the entity ports (ins left, outs right by default). `base` carries
+   identity + package cosmetics forward when re-saving an existing
+   module; a custom pin layout survives only while the pin counts still
+   match the new port list. */
+export function makeVhdlChipDef(name: string, source: string, module: VhdlModule, base?: ChipDef): ChipDef {
+  const insP = module.ports.filter(p => p.dir === 'in');
+  const outsP = module.ports.filter(p => p.dir === 'out');
+  const def: ChipDef = {
+    id: base?.id ?? 'chip_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8),
+    name: name.trim().slice(0, 24) || module.name.slice(0, 24) || 'VHDL',
+    inputs: insP.map(p => p.name.slice(0, 8)),
+    outputs: outsP.map(p => p.name.slice(0, 8)),
+    inputComps: [],
+    outputComps: [],
+    inputBits: insP.map(p => clampBits(p.bits)),
+    outputBits: outsP.map(p => clampBits(p.bits)),
+    vhdl: source,
+    comps: [],
+    wires: [],
+    createdAt: base?.createdAt ?? Date.now(),
+    ...(base?.folder ? { folder: base.folder } : {}),
+  };
+  if (base?.layout && base.layout.ins.length === insP.length && base.layout.outs.length === outsP.length) {
+    def.layout = cloneChipLayout(base.layout);
+  }
+  if (base?.shape) {
+    def.shape = base.shape;
+    if (base.shapePts) def.shapePts = base.shapePts.map(p => ({ x: p.x, y: p.y }));
+  }
+  return def;
 }
 export function sanitizeChipDef(def: ChipDef): ChipDef {
   const board = cloneBoard({ comps: def.comps ?? [], wires: def.wires ?? [] });
@@ -887,6 +942,9 @@ function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipL
   for (const a of comps) {
     if (a.type !== 'NAND' && a.type !== 'NOR') continue;
     if (hasEdge(a)) continue;
+    // the stable-state equations below are 1-bit; leave bus-width gates
+    // to the plain delta passes
+    if (clampBits(a.bits ?? 1) !== 1) continue;
     const ga = getGeom(a, lib);
 
     for (let ai = 0; ai < ga.ins.length; ai++) {
@@ -898,6 +956,7 @@ function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipL
       const b = byId.get(bId);
       if (!b || b.type !== a.type) continue;
       if (hasEdge(b)) continue;
+      if (clampBits(b.bits ?? 1) !== 1) continue;
 
       const gb = getGeom(b, lib);
       const bi = gb.ins.findIndex((_, i) => readsFrom(b.id, i, outKey(a.id)));
@@ -1034,6 +1093,15 @@ export function evalChip(
   depth = 0,
   now = Date.now(),
 ): bigint[] {
+  // VHDL-backed chips run their compiled module instead of a netlist.
+  if (isVhdlChip(def)) {
+    const m = compiledVhdl(def.vhdl!);
+    if (!m) return def.outputs.map(() => 0n);
+    state.prevIns ??= {};
+    const widths = chipInputBits(def);
+    return evalVhdlModule(m, state, def.inputs.map((_, i) => maskVal(ins[i], widths[i])));
+  }
+
   // Legacy chips (no per-pin bits) keep exact 1-bit-in / raw-out behavior;
   // chips saved with the pin-width feature mask to each pin's declared bus.
   const inB = def.inputBits, outB = def.outputBits;

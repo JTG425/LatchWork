@@ -33,6 +33,17 @@
     val?: bigint;       // VAL / multi-bit IPIN: driven value (bus integer)
     edgeable?: boolean; // gates/chips can be sampled on a clock edge
     edge?: EdgeMode;
+    probeable?: boolean; // has a signal the timing diagram can record
+    probe?: boolean;     // currently plotted in the timing diagram
+  }
+
+  /* One recorded waveform for the timing diagram: value-change points
+     (the signal holds each value until the next point). */
+  export interface TimingTrace {
+    id: string;
+    name: string;
+    bits: number;
+    pts: { t: number; v: bigint }[];
   }
 
   export interface PlacingInfo { type: CompType; chipId?: string }
@@ -80,6 +91,13 @@
     /* live simulation state of one placed chip instance (its internals) —
        the returned object is the editor's own; treat it as read-only */
     getChipSubState(compId: string): SimState | null;
+    /* timing diagram: mark/unmark a component's signal for recording,
+       read the recorded traces (editor-owned, treat as read-only),
+       pause/resume recording, and wipe the recording */
+    setProbe(id: string, on: boolean): void;
+    getTiming(): { paused: boolean; traces: TimingTrace[] };
+    setTimingPaused(paused: boolean): void;
+    clearTiming(): void;
     rerender(): void;
     destroy(): void;
   }
@@ -224,6 +242,8 @@
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
         edgeable: edgeableComp(c),
         edge: defaultEdgeForComp(c),
+        probeable: true,
+        probe: !!c.probe,
       };
     }
     function emitSel() {
@@ -290,7 +310,46 @@
     const clockTimer = window.setInterval(() => {
       const sig = clockSig(Date.now());
       if (sig !== lastClockSig) { lastClockSig = sig; refresh(false); }
+      else sampleTiming();   // refresh() already sampled on the change path
     }, 25);
+
+    /* ── timing diagram recording ──
+       Probed comps (c.probe) record value-change points. A comp's
+       "signal" is its first output when it has one (gates, clocks,
+       memory Q), otherwise its first input (LEDs, output pins,
+       tunnels). Traces self-prune when the probe or comp goes away. */
+    let timingPaused = false;
+    const TRACE_CAP = 4000;
+    const traces = new Map<string, TimingTrace>();
+    function probeSignal(c: Comp): { v: bigint; bits: number } | null {
+      const g = getGeom(c, lib());
+      if (g.outs.length) return { v: sim.vals[c.id + ':0'] ?? 0n, bits: g.outs[0].bits ?? 1 };
+      if (g.ins.length) return { v: c._ins?.[0] ?? 0n, bits: g.ins[0].bits ?? 1 };
+      return null;
+    }
+    function sampleTiming() {
+      if (timingPaused) return;
+      const now = Date.now();
+      const live = new Set<string>();
+      for (const c of comps) {
+        if (!c.probe) continue;
+        const s = probeSignal(c);
+        if (!s) continue;
+        live.add(c.id);
+        let tr = traces.get(c.id);
+        if (!tr) { tr = { id: c.id, name: '', bits: 1, pts: [] }; traces.set(c.id, tr); }
+        tr.name = (c.label || '').trim() || getGeom(c, lib()).name;
+        tr.bits = s.bits;
+        const last = tr.pts[tr.pts.length - 1];
+        if (!last || last.v !== s.v) {
+          tr.pts.push({ t: now, v: s.v });
+          if (tr.pts.length > TRACE_CAP) tr.pts.splice(0, tr.pts.length - TRACE_CAP);
+        }
+      }
+      if (traces.size > live.size) {
+        for (const id of [...traces.keys()]) if (!live.has(id)) traces.delete(id);
+      }
+    }
 
     /* ── rendering ── */
     function compSVG(c: Comp, ghost: boolean): string {
@@ -493,10 +552,15 @@
       const core = stubs + inner + pins;
       const rotated = rot ? `<g transform="${rotTransform(rot, g.w, g.h)}">${core}</g>` : core;
       let extra = '';
+      if (!ghost && c.probe) {
+        // timing-diagram flag pinned to the footprint's top-right corner
+        const f = footprint(rot, g.w, g.h);
+        extra += `<g class="probeflag"><path d="M${f.w - 2},-4 V-17"/><path d="M${f.w - 2},-17 h10 v7 h-10 z"/></g>`;
+      }
       if ((c.type === 'CHIP' || isBusToolType(c.type)) && selected) {
         // corner grip lives in footprint space so it's always bottom-right
         const f = footprint(rot, g.w, g.h);
-        extra = `<path class="resizegrip" d="M${f.w - 13},${f.h - 2} L${f.w - 2},${f.h - 13} M${f.w - 8},${f.h - 2} L${f.w - 2},${f.h - 8}"/>
+        extra += `<path class="resizegrip" d="M${f.w - 13},${f.h - 2} L${f.w - 2},${f.h - 13} M${f.w - 8},${f.h - 2} L${f.w - 2},${f.h - 8}"/>
           <rect class="resizehit" data-resize="${c.id}" x="${f.w - 16}" y="${f.h - 16}" width="22" height="22"/>`;
       }
 
@@ -600,6 +664,7 @@
 
     function refresh(changed = true) {
       recompute();
+      sampleTiming();
       render();
       if (changed) cb.onBoardChange();
     }
@@ -1223,6 +1288,19 @@
         if (!c || c.type !== 'CHIP') return null;
         return sim.sub[compId] ?? null;
       },
+      setProbe(id, on) {
+        const c = find(id);
+        if (!c) return;
+        if (on) c.probe = true;
+        else { delete c.probe; traces.delete(id); }
+        if (selIds.has(id)) emitSel();
+        refresh();
+      },
+      getTiming() {
+        return { paused: timingPaused, traces: [...traces.values()] };
+      },
+      setTimingPaused(paused) { timingPaused = paused; },
+      clearTiming() { traces.clear(); },
       removeChipInstances(chipId) {
         const doomed = new Set(comps.filter(c => c.chipId === chipId).map(c => c.id));
         if (!doomed.size) { refresh(false); return; }

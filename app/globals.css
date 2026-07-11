@@ -147,3 +147,53 @@
 .ple-drawpt{fill:var(--accent);stroke:var(--canvas);stroke-width:1;pointer-events:none}
 .ple-drawpt.first{fill:#fff;stroke:var(--accent);stroke-width:2}
 @media(max-width:860px){#main{position:relative}#inspector{position:absolute;right:0;top:0;bottom:0;z-index:6;box-shadow:-12px 0 30px rgba(0,0,0,.35)}.pal-groupbody{flex-direction:row;height:auto!important}}
+
+/* ── timing diagram panel ── */
+#timingpanel{flex-shrink:0;background:var(--panel);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-top:1px solid var(--panel-border);overflow:hidden;display:flex;flex-direction:column}
+.tp-head{display:flex;align-items:center;gap:10px;padding:7px 12px;border-bottom:1px solid var(--panel-border);flex-shrink:0}
+.tp-head .spacer{flex:1}
+.tp-title{font-size:12.5px;font-weight:600}
+.tp-sub{font-size:11px;color:var(--muted)}
+.tp-head .tbtn{padding:3px 9px;font-size:11.5px}
+.tp-head #zoomgrp button{height:23px;width:24px;font-size:13px}
+.tp-body{max-height:220px;min-height:64px;overflow-y:auto;overflow-x:hidden;background:var(--canvas)}
+.tp-empty{padding:18px 16px;font-size:12px;color:var(--muted);line-height:1.6}
+.tp-empty b{color:var(--text);font-weight:500}
+.tw-line{fill:none;stroke:var(--hi);stroke-width:1.8;stroke-linejoin:round}
+.tw-bus{fill:none;stroke:var(--accent);stroke-width:1.5;stroke-linejoin:round}
+.tw-busval{fill:var(--text);font-size:10.5px}
+.tw-name{fill:var(--text);font-size:11.5px}
+.tw-bits{fill:var(--muted);font-size:9.5px}
+.tw-grid{stroke:#2c2c33;stroke-width:1}
+.tw-gridlabel{fill:#6a6a75;font-size:9px}
+.tw-rowsep{stroke:#26262c;stroke-width:1}
+.tw-gutter{stroke:var(--panel-border);stroke-width:1}
+
+/* probe flag drawn on watched components */
+.probeflag path{stroke:var(--accent);stroke-width:1.6;fill:var(--accent);pointer-events:none}
+
+/* inspector checkbox row */
+.side-check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer}
+.side-check input{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
+
+/* ── VHDL module editor ── */
+.dialog.vhdldialog{width:min(94vw,780px);max-height:90vh;display:flex;flex-direction:column}
+.vhdl-intro{font-size:12px;color:var(--muted);line-height:1.55;margin-bottom:10px}
+.vhdl-intro b{color:var(--text);font-weight:500}
+.vhdl-intro code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11px;background:#17171b;border:1px solid var(--panel-border);border-radius:4px;padding:0 4px}
+.vhdl-body{display:flex;flex-direction:column;gap:8px;min-height:0;flex:1}
+.vhdl-editor{width:100%;flex:1;min-height:240px;max-height:46vh;background:#141418;border:1px solid var(--panel-border);border-radius:10px;color:var(--text);padding:12px 14px;font-size:12.5px;line-height:1.55;resize:vertical;tab-size:2;white-space:pre;overflow:auto;-webkit-user-select:text;user-select:text}
+.vhdl-editor:focus{outline:none;border-color:var(--accent)}
+.vhdl-status{min-height:34px;font-size:12px}
+.vhdl-ok{color:var(--hi);font-size:12px}
+.vhdl-ok b{color:var(--text);font-weight:600}
+.vhdl-ports{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.vhdl-port{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:10.5px;border:1px solid var(--panel-border);border-radius:6px;padding:2px 7px;color:var(--text);background:#222228}
+.vhdl-port.in{border-color:rgba(10,132,255,.5)}
+.vhdl-port.out{border-color:rgba(48,209,88,.5)}
+.vhdl-port em{font-style:normal;color:var(--muted)}
+.vhdl-errors{display:flex;flex-direction:column;gap:4px;max-height:96px;overflow-y:auto}
+.vhdl-error{color:#ff8a80;font-size:12px;line-height:1.45}
+.vhdl-error .mono{background:rgba(255,69,58,.12);border-radius:4px;padding:0 5px;margin-right:6px;font-size:10.5px}
+.vhdl-name{margin-top:10px}
+.vhdl-view{background:#141418;border:1px solid var(--panel-border);border-radius:10px;padding:12px 14px;font-size:11.5px;line-height:1.55;max-height:260px;overflow:auto;white-space:pre;color:var(--text);-webkit-user-select:text;user-select:text}

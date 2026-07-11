@@ -8,7 +8,7 @@ import {
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
   isMemoryType, isBusToolType, MAX_WIRE_BITS, MAX_GATE_INS, BINARY_VALUE_MAX_BITS, clampBits,
   chipPinSources, chipPinName, defaultChipLayout, cloneBoard, sanitizeChipDef,
-  busToolLayout, bitWeightName, chipUniformBits, scaleChipDefBits,
+  busToolLayout, bitWeightName, chipUniformBits, scaleChipDefBits, isVhdlChip,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
@@ -16,6 +16,8 @@ import PinLayoutEditor, { LayoutPin } from '@/components/PinLayoutEditor';
 import PeekDialog, { ChipPackageEditor } from '@/components/PeekDialog';
 import CommunityDialog from '@/components/CommunityDialog';
 import ChipAnalysis, { ChipPreview } from '@/components/ChipAnalysis';
+import VhdlDialog from '@/components/VhdlDialog';
+import TimingPanel from '@/components/TimingPanel';
 import LogoMark from '@/components/Logo';
 
 const LS_BOARD = 'latchwork.board.v1';   // legacy single-board key, migrated into tabs
@@ -211,6 +213,8 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   const [editAsk, setEditAsk] = useState<ChipDef | null>(null);
   const [deleteAsk, setDeleteAsk] = useState<ChipDef | null>(null);
   const [peek, setPeek] = useState<{ compId: string; chipId: string } | null>(null);
+  const [vhdlEdit, setVhdlEdit] = useState<{ base?: ChipDef } | null>(null);
+  const [timingOpen, setTimingOpen] = useState(false);
   const [busEdit, setBusEdit] = useState<{ id: string; type: 'COMB' | 'SPLIT'; nIns: number; layout: ChipLayout } | null>(null);
   const [folderMenu, setFolderMenu] = useState<string | null>(null);
   const [newFolder, setNewFolder] = useState('');
@@ -362,16 +366,36 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     addTab(def.name, cloneBoard({ comps: def.comps, wires: def.wires }), def.id);
   }, [switchTab, addTab]);
 
+  /* VHDL chips have no circuit — "edit internals" means editing the code. */
   const askEditChip = useCallback((chipId: string) => {
     const def = chipsRef.current[chipId];
-    if (def) setEditAsk(def);
+    if (!def) return;
+    if (isVhdlChip(def)) { setInspect(null); setPeek(null); setVhdlEdit({ base: def }); return; }
+    setEditAsk(def);
   }, []);
 
-  /* Double-click on a placed chip → peek inside it, live. */
+  /* Double-click on a placed chip → peek inside it, live (VHDL → code editor). */
   const openPeek = useCallback((compId: string, chipId: string) => {
-    if (!chipsRef.current[chipId]) return;
+    const def = chipsRef.current[chipId];
+    if (!def) return;
+    if (isVhdlChip(def)) { setVhdlEdit({ base: def }); return; }
     setPeek({ compId, chipId });
   }, []);
+
+  /* Save (or re-save) a VHDL module as a library chip. */
+  const saveVhdl = useCallback((def: ChipDef) => {
+    const exists = !!chipsRef.current[def.id];
+    const list = exists
+      ? Object.values(chipsRef.current).map(c => (c.id === def.id ? def : c)).sort((a, b) => a.createdAt - b.createdAt)
+      : [...Object.values(chipsRef.current).sort((a, b) => a.createdAt - b.createdAt), def];
+    setChips(list);
+    setVhdlEdit(null);
+    // placed copies may have new pin widths — re-seed touching wires
+    apiRef.current!.refreshWireBits();
+    notify(exists
+      ? `Updated “${def.name}” — every placed copy runs the new VHDL.`
+      : `Saved “${def.name}” — it’s in your palette under My chips.`);
+  }, [setChips, notify]);
 
   /* Double-click on a combiner/splitter → rearrange its pins & size. */
   const openBusEdit = useCallback((compId: string) => {
@@ -845,7 +869,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       <PalIcon type="CHIP" chip={def} />
       <div className="chipmeta">
         <div className="nm ellip">{hiName(def.name)}</div>
-        <div className="sub">{def.inputs.length} in · {def.outputs.length} out</div>
+        <div className="sub">{isVhdlChip(def) ? 'VHDL · ' : ''}{def.inputs.length} in · {def.outputs.length} out</div>
       </div>
       <div className="chip-actions">
         <button className="chipfolder" aria-label={`Move ${def.name} to a folder`} title="Move to folder"
@@ -931,6 +955,11 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         <button className="tbtn" onClick={() => api().resetView()}>Reset view</button>
         <button className="tbtn" onClick={() => api().powerCycle()} title="Zero every signal and latch, like flipping the power">Power cycle</button>
         <button className="tbtn danger" onClick={clearBoard}>Clear</button>
+        <button className={'tbtn' + (timingOpen ? ' on' : '')} aria-pressed={timingOpen}
+          title="Timing diagram — record and plot signals over time"
+          onClick={() => setTimingOpen(o => !o)}>Timing</button>
+        <button className="tbtn" onClick={() => setVhdlEdit({})}
+          title="Write a VHDL entity + architecture and use it as a chip">VHDL</button>
         <button className="tbtn" onClick={() => setCommunityOpen(true)}
           title="Browse chips shared by other builders — or share your own">Community</button>
         {editingChip
@@ -1332,7 +1361,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
                   </label>
                 )}
 
-                {sel.kind === 'comp' && sel.type === 'CHIP' && sel.chipId && lib[sel.chipId] && (
+                {sel.kind === 'comp' && sel.type === 'CHIP' && sel.chipId && lib[sel.chipId] && !isVhdlChip(lib[sel.chipId]) && (
                   <label className="side-field"
                     title="Scale the whole chip to this bus width — every gate, pin, value, and wire inside the chip changes bit length (applies to all placed copies)">
                     <span>Bits · all internals</span>
@@ -1355,13 +1384,35 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
 
                 {sel.kind === 'comp' && sel.type === 'CHIP' && sel.chipId && lib[sel.chipId] && (
                   <div className="side-actions">
-                    <button className="tbtn" onClick={() => openPeek(sel.id, sel.chipId!)}
-                      title="Watch this chip's internals react to its live inputs — and adjust its package">
-                      Peek inside
-                    </button>
-                    <button className="tbtn" onClick={() => askEditChip(sel.chipId!)}
-                      title="Open the chip's circuit in an editor tab">Edit internals…</button>
+                    {isVhdlChip(lib[sel.chipId]) ? (
+                      <button className="tbtn" onClick={() => askEditChip(sel.chipId!)}
+                        title="Open this chip's VHDL source in the editor">Edit VHDL…</button>
+                    ) : (
+                      <>
+                        <button className="tbtn" onClick={() => openPeek(sel.id, sel.chipId!)}
+                          title="Watch this chip's internals react to its live inputs — and adjust its package">
+                          Peek inside
+                        </button>
+                        <button className="tbtn" onClick={() => askEditChip(sel.chipId!)}
+                          title="Open the chip's circuit in an editor tab">Edit internals…</button>
+                      </>
+                    )}
                   </div>
+                )}
+
+                {sel.kind === 'comp' && sel.probeable && (
+                  <label className="side-check"
+                    title="Record this part's signal (first output, or first input for LEDs and output pins) and plot it in the timing diagram">
+                    <input
+                      type="checkbox"
+                      checked={!!sel.probe}
+                      onChange={e => {
+                        api().setProbe(sel.id, e.target.checked);
+                        if (e.target.checked) setTimingOpen(true);
+                      }}
+                    />
+                    <span>Plot in timing diagram</span>
+                  </label>
                 )}
 
                 <div className="side-actions">
@@ -1382,6 +1433,10 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
           )}
         </AnimatePresence>
       </div>
+
+      <AnimatePresence>
+        {timingOpen && <TimingPanel key="timing" api={api} onClose={() => setTimingOpen(false)} />}
+      </AnimatePresence>
 
       <div id="tabbar" role="tablist" aria-label="Editor tabs">
         <div className="tabscroll">
@@ -1464,7 +1519,14 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
               <button className="community-close" aria-label="Close" onClick={() => setInspect(null)}>×</button>
             </div>
             <div className="inspect-body">
-              <ChipPreview def={inspect} lib={lib} tall />
+              {isVhdlChip(inspect) ? (
+                <div className="analysis">
+                  <h3>VHDL source <em>— this chip runs the compiled module below</em></h3>
+                  <pre className="vhdl-view mono">{inspect.vhdl}</pre>
+                </div>
+              ) : (
+                <ChipPreview def={inspect} lib={lib} tall />
+              )}
               <ChipAnalysis def={inspect} lib={lib} />
               <div className="analysis">
                 <h3>Package &amp; pins <em>— drag pins to any edge, resize, or reshape</em></h3>
@@ -1473,7 +1535,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
                 onSave={pkg => { const nd = applyChipPackage(inspect.id, pkg); if (nd) setInspect(nd); }} />
             </div>
             <div className="dialog-actions">
-              <button className="tbtn" onClick={() => askEditChip(inspect.id)}>Edit internals…</button>
+              <button className="tbtn" onClick={() => askEditChip(inspect.id)}>
+                {isVhdlChip(inspect) ? 'Edit VHDL…' : 'Edit internals…'}
+              </button>
               <button className="tbtn primary" onClick={() => setInspect(null)}>Done</button>
             </div>
           </Modal>
@@ -1491,6 +1555,17 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
             onSavePackage={pkg => applyChipPackage(peek.chipId, pkg)}
             onEditInternals={() => openChipTab(peekDef)}
             onClose={() => setPeek(null)}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {vhdlEdit && (
+          <VhdlDialog
+            key="vhdl"
+            base={vhdlEdit.base}
+            onSave={saveVhdl}
+            onClose={() => setVhdlEdit(null)}
           />
         )}
       </AnimatePresence>
