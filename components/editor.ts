@@ -15,7 +15,10 @@
     SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType, isBusToolType, chipLabelOffset,
     wireRouteCorners, wireCornerPath, wireEndFacing, chipBodyPath,
     cloneBoard, cloneWireEnd,
+    isNoteType, TableData, normalizeTable, defaultTruthTable,
+    NOTE_MAX_TEXT, clampNoteFont, RECT_MIN,
   } from '@/lib/engine';
+  import { noteMarkup } from '@/lib/notes';
   import { GATE_DEFS, isGateType } from '@/lib/gates';
 
   export interface SelInfo {
@@ -35,6 +38,11 @@
     edge?: EdgeMode;
     probeable?: boolean; // has a signal the timing diagram can record
     probe?: boolean;     // currently plotted in the timing diagram
+    /* notations */
+    noteText?: string;   // NOTE: the note's text
+    fontSize?: number;   // NOTE: text size
+    color?: string;      // NOTE/RECT/TABLE: accent color (unset = default)
+    noteShape?: 'rect' | 'ellipse';  // RECT silhouette
   }
 
   /* One recorded waveform for the timing diagram: value-change points
@@ -60,6 +68,8 @@
     onChipDblClick?(compId: string, chipId: string): void;
     /* double-click on a combiner/splitter — Simulator opens its pin-layout editor */
     onBusToolDblClick?(compId: string): void;
+    /* double-click on a truth-table notation — Simulator opens the table editor */
+    onTableDblClick?(compId: string): void;
   }
 
   export interface EditorApi {
@@ -96,6 +106,13 @@
     /* timing diagram: mark/unmark a component's signal for recording,
        read the recorded traces (editor-owned, treat as read-only),
        pause/resume recording, and wipe the recording */
+    /* notations: note text/size, accent color, highlight silhouette,
+       and the truth table's cells + input divider */
+    setNoteText(id: string, text: string): void;
+    setNoteFontSize(id: string, px: number): void;
+    setNoteColor(id: string, color: string | null): void;
+    setNoteShape(id: string, shape: 'rect' | 'ellipse'): void;
+    setTable(id: string, table: TableData): void;
     setProbe(id: string, on: boolean): void;
     getTiming(): { paused: boolean; traces: TimingTrace[] };
     setTimingPaused(paused: boolean): void;
@@ -241,7 +258,7 @@
         kind: 'comp', id: c.id, type: c.type, chipId: c.chipId, label: c.label || '',
         labelable: c.type === 'IN' || c.type === 'BTN' || c.type === 'OUT' || c.type === 'CHIP'
           || c.type === 'IPIN' || c.type === 'OPIN' || c.type === 'CLK'
-          || c.type === 'TUN' || c.type === 'SSEG' || c.type === 'VAL',
+          || c.type === 'TUN' || c.type === 'SSEG' || c.type === 'VAL' || c.type === 'RECT',
         nIns: MULTI_IN_GATES.has(c.type)
           ? clampGateIns(c.nIns)
           : isBusToolType(c.type) ? clampBits(c.nIns ?? 4) : undefined,
@@ -250,8 +267,11 @@
         freq: c.type === 'CLK' ? clampFreq(c.freq) : undefined,
         edgeable: edgeableComp(c),
         edge: defaultEdgeForComp(c),
-        probeable: true,
+        probeable: !isNoteType(c.type),
         probe: !!c.probe,
+        ...(c.type === 'NOTE' ? { noteText: c.text ?? '', fontSize: clampNoteFont(c.fontSize) } : {}),
+        ...(isNoteType(c.type) ? { color: c.color } : {}),
+        ...(c.type === 'RECT' ? { noteShape: c.noteShape ?? 'rect' } : {}),
       };
     }
     function emitSel() {
@@ -456,7 +476,10 @@
         pins += pinSVG('out', i, p, hi);
       });
 
-      if (isGateType(c.type)) {
+      if (isNoteType(c.type)) {
+        /* notations: pinless, shared markup in lib/notes so previews match */
+        inner = noteMarkup(c, g);
+      } else if (isGateType(c.type)) {
         /* Body path, back curve, and inversion bubble all come from the
            gate's own file in lib/gates — look there for shape bugs. */
         const gd = GATE_DEFS[c.type];
@@ -625,7 +648,12 @@
         const f = footprint(rot, g.w, g.h);
         extra += `<g class="probeflag"><path d="M${f.w - 2},-4 V-17"/><path d="M${f.w - 2},-17 h10 v7 h-10 z"/></g>`;
       }
-      if ((c.type === 'CHIP' || isBusToolType(c.type)) && selected) {
+      if (isNoteType(c.type) && selected) {
+        // notes have no stroked .body — show selection as a dashed frame
+        const f = footprint(rot, g.w, g.h);
+        extra += `<rect class="notesel" x="-3" y="-3" width="${f.w + 6}" height="${f.h + 6}" rx="7"/>`;
+      }
+      if ((c.type === 'CHIP' || isBusToolType(c.type) || c.type === 'RECT') && selected) {
         // corner grip lives in footprint space so it's always bottom-right
         const f = footprint(rot, g.w, g.h);
         extra += `<path class="resizegrip" d="M${f.w - 13},${f.h - 2} L${f.w - 2},${f.h - 13} M${f.w - 8},${f.h - 2} L${f.w - 2},${f.h - 8}"/>
@@ -638,6 +666,10 @@
 
     function render() {
       let out = `<rect x="-20000" y="-20000" width="40000" height="40000" fill="url(#dots)"/>`;
+
+      // notations render first so they sit BEHIND the circuit — a
+      // highlight tints the parts on top of it without covering them
+      for (const c of comps) if (isNoteType(c.type)) out += compSVG(c, false);
 
       const nets = analyzeNets(wires, tunnelPinGroups(comps));
       const netVal = (keys?: string[]) => {
@@ -672,7 +704,7 @@
         out += `<path class="wirepreview" d="${d}"/>`;
         for (const v of wiring.via) out += `<circle class="wirestop" cx="${v.x}" cy="${v.y}" r="3"/>`;
       }
-      for (const c of comps) out += compSVG(c, false);
+      for (const c of comps) if (!isNoteType(c.type)) out += compSVG(c, false);
 
       // solder-dot notation: pins with several wires, and mid-wire splits
       for (const [key, count] of nets.pinWireCounts) {
@@ -725,7 +757,7 @@
       world.setAttribute('transform', `translate(${view.x},${view.y}) scale(${view.k})`);
       world.innerHTML = out;
 
-      cb.onCounts({ parts: comps.length, wires: wires.length });
+      cb.onCounts({ parts: comps.filter(c => !isNoteType(c.type)).length, wires: wires.length });
       cb.onZoom(Math.round(view.k * 100));
       svg.classList.toggle('wiring', !!wiring || wireTool);
       svg.classList.toggle('placing', !!placing);
@@ -798,6 +830,8 @@
       if (placing.type === 'SHIFT') c.bits = 8;
       if (placing.type === 'CLK') c.freq = 1;
       if (isBusToolType(placing.type)) c.nIns = 4;
+      if (placing.type === 'NOTE') c.text = 'Note';
+      if (placing.type === 'TABLE') c.table = defaultTruthTable();
       const edge = defaultEdgeForComp(c);
       if (edge) c.edge = edge;
       comps.push(c);
@@ -999,6 +1033,7 @@
           const c = find((compEl as SVGElement).dataset.comp!);
           if (c && c.type === 'CHIP' && c.chipId) cb.onChipDblClick?.(c.id, c.chipId);
           else if (c && isBusToolType(c.type)) cb.onBusToolDblClick?.(c.id);
+          else if (c && c.type === 'TABLE') cb.onTableDblClick?.(c.id);
         }
         return;
       }
@@ -1031,6 +1066,9 @@
         } else if (isBusToolType(c.type)) {
           minW = busToolMinW(c.type);
           minH = busToolMinH(c);
+        } else if (c.type === 'RECT') {
+          minW = RECT_MIN;
+          minH = RECT_MIN;
         }
         const fw = snap(pt.x - c.x), fh = snap(pt.y - c.y);
         if ((c.rot ?? 0) & 1) {
@@ -1365,9 +1403,43 @@
         if (!c || c.type !== 'CHIP') return null;
         return sim.sub[compId] ?? null;
       },
+      setNoteText(id, text) {
+        const c = find(id);
+        if (!c || c.type !== 'NOTE') return;
+        // no emitSel: the inspector textarea is a controlled draft
+        c.text = text.slice(0, NOTE_MAX_TEXT);
+        refresh();
+      },
+      setNoteFontSize(id, px) {
+        const c = find(id);
+        if (!c || c.type !== 'NOTE') return;
+        c.fontSize = clampNoteFont(px);
+        if (selIds.has(id)) emitSel();
+        refresh();
+      },
+      setNoteColor(id, color) {
+        const c = find(id);
+        if (!c || !isNoteType(c.type)) return;
+        if (color) c.color = color; else delete c.color;
+        if (selIds.has(id)) emitSel();
+        refresh();
+      },
+      setNoteShape(id, shape) {
+        const c = find(id);
+        if (!c || c.type !== 'RECT') return;
+        if (shape === 'ellipse') c.noteShape = 'ellipse'; else delete c.noteShape;
+        if (selIds.has(id)) emitSel();
+        refresh();
+      },
+      setTable(id, table) {
+        const c = find(id);
+        if (!c || c.type !== 'TABLE') return;
+        c.table = normalizeTable(table);
+        refresh();
+      },
       setProbe(id, on) {
         const c = find(id);
-        if (!c) return;
+        if (!c || isNoteType(c.type)) return;
         if (on) c.probe = true;
         else { delete c.probe; traces.delete(id); }
         if (selIds.has(id)) emitSel();

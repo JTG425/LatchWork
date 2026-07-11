@@ -9,6 +9,8 @@ import {
   isMemoryType, isBusToolType, MAX_WIRE_BITS, MAX_GATE_INS, BINARY_VALUE_MAX_BITS, clampBits,
   chipPinSources, chipPinName, defaultChipLayout, cloneBoard, sanitizeChipDef,
   busToolLayout, bitWeightName, chipUniformBits, scaleChipDefBits, isVhdlChip, makeVhdlChipDef,
+  isNoteType, NOTE_COLORS, NOTE_FONT_SIZES, NOTE_MAX_TEXT,
+  TableData, normalizeTable, defaultTruthTable, TABLE_MAX_CELL, TABLE_MAX_COLS, TABLE_MAX_ROWS,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
@@ -37,7 +39,8 @@ const valDraftFor = (v: bigint, bits: number) =>
   useHexValue(bits) ? v.toString(16).toUpperCase().padStart(hexDigits(bits), '0') : v.toString(2).padStart(bits, '0');
 
 interface FolderMeta { color?: string }
-const FOLDER_COLORS = ['#0a84ff', '#30d158', '#ffd60a', '#ff9f0a', '#ff453a', '#ff375f', '#bf5af2', '#64d2ff'];
+/* folders and canvas notations share one accent palette */
+const FOLDER_COLORS = NOTE_COLORS;
 const MAX_FOLDER_NAME = 20;
 const cleanFolderName = (s: string) => s.trim().slice(0, MAX_FOLDER_NAME);
 
@@ -110,6 +113,21 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     case 'COMB': body = <><rect x="0" y="0" width="60" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,0 H0 M-8,20 H0 M-8,40 H0 M-8,60 H0 M60,40 H70" stroke="var(--lo)" strokeWidth="2" /><text x="30" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
     case 'SPLIT': body = <><rect x="0" y="0" width="80" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,40 H0 M80,0 H90 M80,20 H90 M80,40 H90 M80,60 H90" stroke="var(--lo)" strokeWidth="2" /><text x="40" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
     case 'IPIN': body = <><rect x="0" y="0" width="40" height="40" rx="7" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
+    case 'NOTE': body = <text x="4" y={g.h - 5} fill="var(--muted)" fontSize="24" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">Aa</text>; break;
+    case 'RECT': body = <rect x="0" y="0" width={g.w} height={g.h} rx="16" fill="var(--accent)" fillOpacity=".45" stroke="var(--accent)" strokeOpacity=".8" strokeWidth="3" />; break;
+    case 'TABLE': {
+      const rh = g.h / 5;
+      body = (
+        <>
+          <rect x="0" y="0" width={g.w} height={g.h} rx="6" fill={fill} stroke={stroke} strokeWidth="1.5" />
+          <rect x="1" y="1" width={g.w - 2} height={rh} fill="var(--accent)" opacity=".3" />
+          {[1, 2, 3, 4].map(i => <path key={i} d={`M0,${i * rh} H${g.w}`} stroke={stroke} strokeWidth="1.5" />)}
+          <path d={`M${g.w / 3},0 V${g.h}`} stroke={stroke} strokeWidth="1.5" />
+          <path d={`M${(2 * g.w) / 3},0 V${g.h}`} stroke="var(--accent)" strokeWidth="3" opacity=".8" />
+        </>
+      );
+      break;
+    }
     case 'OPIN': body = <><circle cx="20" cy="20" r="19" fill={fill} stroke="var(--accent)" strokeWidth="1.5" /><text x="20" y="27" textAnchor="middle" fill="var(--muted)" fontSize="16" fontWeight="600" fontFamily="ui-monospace,Menlo,monospace">0</text></>; break;
     case 'CHIP': {
       const d = chipBodyPath(chip?.shape, g.w, g.h, chip?.shapePts);
@@ -197,6 +215,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   const [chips, setChipsState] = useState<ChipDef[]>([]);
   const [sel, setSel] = useState<SelInfo | null>(null);
   const [labelDraft, setLabelDraft] = useState('');
+  const [noteDraft, setNoteDraft] = useState('');
   const [freqDraft, setFreqDraft] = useState('');
   const [freqUnit, setFreqUnit] = useState(1);   // Hz multiplier: 1 | 1e3 | 1e6
   const [valDraft, setValDraft] = useState('');
@@ -454,6 +473,25 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       : `Saved “${def.name}” — it’s in your palette under My chips.`);
   }, [setChips, publishTabs, persistTabs, notify]);
 
+  /* ── truth-table notation editor ──
+     Double-click a placed table (or press "Edit table…" in the
+     inspector) to edit its cells like a document table. Every change
+     applies to the canvas immediately. */
+  const [tableEdit, setTableEdit] = useState<{ id: string; data: TableData } | null>(null);
+
+  const openTableEdit = useCallback((compId: string) => {
+    const c = apiRef.current!.getBoard().comps.find(x => x.id === compId);
+    if (!c || c.type !== 'TABLE') return;
+    setTableEdit({ id: compId, data: normalizeTable(c.table ?? defaultTruthTable()) });
+  }, []);
+
+  const applyTable = (cells: string[][], sep: number) => {
+    if (!tableEdit) return;
+    const data = normalizeTable({ cells, sep });
+    setTableEdit({ id: tableEdit.id, data });
+    apiRef.current!.setTable(tableEdit.id, data);
+  };
+
   /* "Adjust pin locations" — rearrange one placed part's pins & size.
      Works for combiners/splitters and placed chips; the edit is local
      to the instance (a chip's library package is untouched). */
@@ -494,6 +532,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       onSelect: info => {
         setSel(info);
         setLabelDraft(info?.label ?? '');
+        setNoteDraft(info?.noteText ?? '');
         const f = info?.freq;
         const mult = f != null ? (f >= 1e6 ? 1e6 : f >= 1e3 ? 1e3 : 1) : 1;
         setFreqUnit(mult);
@@ -506,6 +545,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       onWireTool: setWireTool,
       onChipDblClick: openPeek,
       onBusToolDblClick: openPinEdit,
+      onTableDblClick: openTableEdit,
       onBoardChange: () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(() => {
@@ -857,6 +897,11 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   const onLabelChange = (v: string) => {
     setLabelDraft(v);
     if (sel) apiRef.current!.setLabel(sel.id, v);
+  };
+
+  const onNoteTextChange = (v: string) => {
+    setNoteDraft(v);
+    if (sel) apiRef.current!.setNoteText(sel.id, v);
   };
 
   const onFreqChange = (v: string) => {
@@ -1312,6 +1357,77 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
                   </label>
                 )}
 
+                {sel.kind === 'comp' && sel.type === 'NOTE' && (
+                  <label className="side-field">
+                    <span>Text</span>
+                    <textarea
+                      className="mono"
+                      rows={3}
+                      value={noteDraft}
+                      placeholder="note text…"
+                      maxLength={NOTE_MAX_TEXT}
+                      aria-label="Note text"
+                      onChange={e => onNoteTextChange(e.target.value)}
+                    />
+                  </label>
+                )}
+
+                {sel.kind === 'comp' && sel.type === 'NOTE' && (
+                  <div className="side-field" title="Text size">
+                    <span>Size</span>
+                    <div className="side-btnrow">
+                      {NOTE_FONT_SIZES.map((n, i) => (
+                        <button
+                          key={n}
+                          className={sel.fontSize === n ? 'on' : ''}
+                          aria-pressed={sel.fontSize === n}
+                          onClick={() => api().setNoteFontSize(sel.id, n)}
+                        >{['S', 'M', 'L', 'XL'][i]}</button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {sel.kind === 'comp' && sel.type === 'RECT' && (
+                  <div className="side-field" title="Highlight silhouette">
+                    <span>Shape</span>
+                    <div className="side-btnrow">
+                      <button className={sel.noteShape !== 'ellipse' ? 'on' : ''}
+                        aria-pressed={sel.noteShape !== 'ellipse'}
+                        onClick={() => api().setNoteShape(sel.id, 'rect')}>Rectangle</button>
+                      <button className={sel.noteShape === 'ellipse' ? 'on' : ''}
+                        aria-pressed={sel.noteShape === 'ellipse'}
+                        onClick={() => api().setNoteShape(sel.id, 'ellipse')}>Ellipse</button>
+                    </div>
+                  </div>
+                )}
+
+                {sel.kind === 'comp' && sel.type && isNoteType(sel.type) && (
+                  <div className="side-field"
+                    title={sel.type === 'RECT' ? 'Highlight color — the shape stays half-transparent' : 'Accent color'}>
+                    <span>Color</span>
+                    <div className="side-swatches">
+                      {NOTE_COLORS.map(c => (
+                        <button key={c} className={'swatch' + (sel.color === c ? ' on' : '')}
+                          style={{ background: c }} aria-label={`Color ${c}`}
+                          onClick={() => api().setNoteColor(sel.id, c)} />
+                      ))}
+                      <button className={'swatch none' + (!sel.color ? ' on' : '')}
+                        title="Default color" aria-label="Default color"
+                        onClick={() => api().setNoteColor(sel.id, null)}>×</button>
+                    </div>
+                  </div>
+                )}
+
+                {sel.kind === 'comp' && sel.type === 'TABLE' && (
+                  <div className="side-actions">
+                    <button className="tbtn" onClick={() => openTableEdit(sel.id)}
+                      title="Edit cells and add rows or columns — double-clicking the table on the canvas works too">
+                      Edit table…
+                    </button>
+                  </div>
+                )}
+
                 {sel.kind === 'wire' && (
                   <label className="side-field" title="Bus width — how many bits this wire carries">
                     <span>Bits</span>
@@ -1713,6 +1829,83 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
             </div>
           </Modal>
         )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {tableEdit && (() => {
+          const { cells } = tableEdit.data;
+          const sep = tableEdit.data.sep ?? 0;
+          const nCols = cells[0].length, nRows = cells.length;
+          const clone = () => cells.map(r => [...r]);
+          const fillCombos = () => {
+            const body = Array.from({ length: 1 << sep }, (_, i) =>
+              Array.from({ length: nCols }, (_, j) => (j < sep ? String((i >> (sep - 1 - j)) & 1) : '')));
+            applyTable([[...cells[0]], ...body], sep);
+          };
+          return (
+            <Modal key="tableedit" className="tabledialog" label="Edit truth table"
+              onDismiss={() => setTableEdit(null)}>
+              <h2>Edit truth table</h2>
+              <p>
+                The first row is the <b>header</b>. The colored divider separates the input
+                columns from the outputs. Changes land on the canvas as you type.
+              </p>
+              <div className="tablegridwrap">
+                <table className="tablegrid"><tbody>
+                  {cells.map((row, r) => (
+                    <tr key={r} className={r === 0 ? 'head' : ''}>
+                      {row.map((cell, j) => (
+                        <td key={j} className={sep === j + 1 && j + 1 < nCols ? 'sep' : ''}>
+                          <input
+                            value={cell}
+                            maxLength={TABLE_MAX_CELL}
+                            aria-label={`Row ${r + 1}, column ${j + 1}`}
+                            onChange={e => {
+                              const cs = clone();
+                              cs[r][j] = e.target.value;
+                              applyTable(cs, sep);
+                            }}
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody></table>
+              </div>
+              <div className="tablectl">
+                <div className="grp">Rows
+                  <button className="step" disabled={nRows <= 2} aria-label="Remove last row"
+                    onClick={() => applyTable(clone().slice(0, -1), sep)}>−</button>
+                  <b className="mono">{nRows - 1}</b>
+                  <button className="step" disabled={nRows >= TABLE_MAX_ROWS} aria-label="Add row"
+                    onClick={() => applyTable([...clone(), Array(nCols).fill('')], sep)}>+</button>
+                </div>
+                <div className="grp">Columns
+                  <button className="step" disabled={nCols <= 1} aria-label="Remove last column"
+                    onClick={() => applyTable(clone().map(r => r.slice(0, -1)), Math.min(sep, nCols - 1))}>−</button>
+                  <b className="mono">{nCols}</b>
+                  <button className="step" disabled={nCols >= TABLE_MAX_COLS} aria-label="Add column"
+                    onClick={() => applyTable(clone().map(r => [...r, '']), sep)}>+</button>
+                </div>
+                <div className="grp" title="How many leading columns are inputs — draws the truth-table divider">
+                  Inputs
+                  <button className="step" disabled={sep <= 0} aria-label="Fewer input columns"
+                    onClick={() => applyTable(clone(), sep - 1)}>−</button>
+                  <b className="mono">{sep}</b>
+                  <button className="step" disabled={sep >= nCols} aria-label="More input columns"
+                    onClick={() => applyTable(clone(), sep + 1)}>+</button>
+                </div>
+                <button className="tbtn" disabled={sep < 1 || sep > 5}
+                  title="Replace the body rows with every 0/1 combination of the input columns (up to 5 inputs)"
+                  onClick={fillCombos}>Fill 0/1 rows</button>
+              </div>
+              <div className="dialog-actions">
+                <div className="spacer" />
+                <button className="tbtn primary" onClick={() => setTableEdit(null)}>Done</button>
+              </div>
+            </Modal>
+          );
+        })()}
       </AnimatePresence>
 
       <AnimatePresence>

@@ -14,10 +14,11 @@
 
 import {
   Comp, Wire, WireEnd, Vec, ChipDef, ChipLib, SimState,
-  getGeom, chipGeom, isPinEnd, isAttachEnd, isMemoryType, isBusToolType, defaultEdgeForComp,
+  getGeom, chipGeom, isPinEnd, isAttachEnd, isMemoryType, isBusToolType, isNoteType, defaultEdgeForComp,
   clampBits, maskVal, formatBusValue, chipLabelOffset, chipBodyPath, analyzeNets, tunnelPinGroups,
   wireRouteCorners, wireCornerPath, wireEndFacing, SEG_NAMES,
 } from './engine';
+import { noteMarkup } from './notes';
 import { GATE_DEFS, isGateType } from './gates';
 
 const esc = (s: string) =>
@@ -79,7 +80,9 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
     pins += `<circle class="pin${hiCls(outV(i))}" cx="${p.x}" cy="${p.y}" r="3.6"/>`;
   });
 
-  if (isGateType(c.type)) {
+  if (isNoteType(c.type)) {
+    inner = noteMarkup(c, g);
+  } else if (isGateType(c.type)) {
     const gd = GATE_DEFS[c.type];
     const gb = clampBits(c.bits ?? 1);
     inner = `<path class="body" d="${gd.body(g.h)}"/>`;
@@ -267,6 +270,8 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
   }
 
   let out = '';
+  // notations sit behind the circuit, same as on the live canvas
+  for (const c of comps) if (isNoteType(c.type)) out += compMarkup(c, lib, liveFor(c));
   for (const w of wires) {
     const a = endPos(w.a), b = endPos(w.b);
     if (!a || !b) continue;
@@ -285,7 +290,7 @@ export function chipInternalsSVG(src: { comps: Comp[]; wires: Wire[] }, lib: Chi
       out += `<text class="buslabel${hi ? ' hi' : ''}" x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 9}" text-anchor="middle">${formatBusValue(hi, bits)}</text>`;
     }
   }
-  for (const c of comps) out += compMarkup(c, lib, liveFor(c));
+  for (const c of comps) if (!isNoteType(c.type)) out += compMarkup(c, lib, liveFor(c));
 
   // solder dots where several wires meet a pin, and at mid-wire splits
   for (const [key, count] of nets.pinWireCounts) {
