@@ -198,6 +198,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   const [sel, setSel] = useState<SelInfo | null>(null);
   const [labelDraft, setLabelDraft] = useState('');
   const [freqDraft, setFreqDraft] = useState('');
+  const [freqUnit, setFreqUnit] = useState(1);   // Hz multiplier: 1 | 1e3 | 1e6
   const [valDraft, setValDraft] = useState('');
   const [armed, setArmed] = useState<PlacingInfo | null>(null);
   const [wireTool, setWireTool] = useState(false);
@@ -218,7 +219,12 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   const [deleteAsk, setDeleteAsk] = useState<ChipDef | null>(null);
   const [peek, setPeek] = useState<{ compId: string; chipId: string } | null>(null);
   const [timingOpen, setTimingOpen] = useState(false);
-  const [busEdit, setBusEdit] = useState<{ id: string; type: 'COMB' | 'SPLIT'; nIns: number; layout: ChipLayout } | null>(null);
+  /* per-instance pin-location editor — combiners, splitters, AND placed
+     chips. Changes stay local to the clicked part. */
+  const [pinEdit, setPinEdit] = useState<{
+    id: string; type: CompType; chipId?: string; nIns?: number;
+    layout: ChipLayout; hasOverride: boolean;
+  } | null>(null);
   const [folderMenu, setFolderMenu] = useState<string | null>(null);
   const [newFolder, setNewFolder] = useState('');
   const [query, setQuery] = useState('');
@@ -448,18 +454,37 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       : `Saved “${def.name}” — it’s in your palette under My chips.`);
   }, [setChips, publishTabs, persistTabs, notify]);
 
-  /* Double-click on a combiner/splitter → rearrange its pins & size. */
-  const openBusEdit = useCallback((compId: string) => {
+  /* "Adjust pin locations" — rearrange one placed part's pins & size.
+     Works for combiners/splitters and placed chips; the edit is local
+     to the instance (a chip's library package is untouched). */
+  const openPinEdit = useCallback((compId: string) => {
     const board = apiRef.current!.getBoard();
     const c = board.comps.find(x => x.id === compId);
-    if (!c || !isBusToolType(c.type)) return;
-    const n = clampBits(c.nIns ?? 4);
-    setBusEdit({
-      id: compId,
-      type: c.type as 'COMB' | 'SPLIT',
-      nIns: n,
-      layout: c.layout ?? busToolLayout(c.type, n),
-    });
+    if (!c) return;
+    if (isBusToolType(c.type)) {
+      const n = clampBits(c.nIns ?? 4);
+      setPinEdit({
+        id: compId,
+        type: c.type,
+        nIns: n,
+        layout: c.layout ?? busToolLayout(c.type, n),
+        hasOverride: !!c.layout,
+      });
+      return;
+    }
+    if (c.type === 'CHIP' && c.chipId) {
+      const def = chipsRef.current[c.chipId];
+      if (!def) return;
+      const valid = c.layout && c.layout.ins.length === def.inputs.length
+        && c.layout.outs.length === def.outputs.length ? c.layout : undefined;
+      setPinEdit({
+        id: compId,
+        type: 'CHIP',
+        chipId: c.chipId,
+        layout: valid ?? def.layout ?? defaultChipLayout(def.inputs.length, def.outputs.length, def.name.length),
+        hasOverride: !!valid,
+      });
+    }
   }, []);
 
   /* ── mount: editor, then chips, then tabs/boards ── */
@@ -469,7 +494,10 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       onSelect: info => {
         setSel(info);
         setLabelDraft(info?.label ?? '');
-        setFreqDraft(info?.freq != null ? String(info.freq) : '');
+        const f = info?.freq;
+        const mult = f != null ? (f >= 1e6 ? 1e6 : f >= 1e3 ? 1e3 : 1) : 1;
+        setFreqUnit(mult);
+        setFreqDraft(f != null ? String(+(f / mult).toFixed(4)) : '');
         setValDraft(info?.val != null ? valDraftFor(info.val, info.pinBits ?? 1) : '');
       },
       onCounts: setCounts,
@@ -477,7 +505,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       onPlacing: setArmed,
       onWireTool: setWireTool,
       onChipDblClick: openPeek,
-      onBusToolDblClick: openBusEdit,
+      onBusToolDblClick: openPinEdit,
       onBoardChange: () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(() => {
@@ -833,7 +861,13 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
 
   const onFreqChange = (v: string) => {
     setFreqDraft(v);
-    const hz = parseFloat(v);
+    const hz = parseFloat(v) * freqUnit;
+    if (sel && isFinite(hz) && hz > 0) apiRef.current!.setFreq(sel.id, hz);
+  };
+
+  const onFreqUnitChange = (mult: number) => {
+    setFreqUnit(mult);
+    const hz = parseFloat(freqDraft) * mult;
     if (sel && isFinite(hz) && hz > 0) apiRef.current!.setFreq(sel.id, hz);
   };
 
@@ -1404,19 +1438,30 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
                 )}
 
                 {sel.kind === 'comp' && sel.type === 'CLK' && (
-                  <label className="side-field" title="Clock frequency" id="freqgrp">
-                    <span>Frequency (Hz)</span>
-                    <input
-                      className="mono"
-                      type="number"
-                      min={0.1}
-                      max={20}
-                      step={0.5}
-                      value={freqDraft}
-                      aria-label="Clock frequency in hertz"
-                      onChange={e => onFreqChange(e.target.value)}
-                    />
-                  </label>
+                  <div className="side-field"
+                    title="Clock frequency (0.1 Hz – 100 MHz). The live canvas only resolves slow clocks — use the timing diagram's Fixed length mode to see kHz/MHz waveforms.">
+                    <span>Frequency</span>
+                    <div className="side-unitrow">
+                      <input
+                        className="mono"
+                        type="number"
+                        min={0}
+                        step="any"
+                        value={freqDraft}
+                        aria-label="Clock frequency"
+                        onChange={e => onFreqChange(e.target.value)}
+                      />
+                      <select
+                        value={freqUnit}
+                        aria-label="Clock frequency unit"
+                        onChange={e => onFreqUnitChange(+e.target.value)}
+                      >
+                        <option value={1}>Hz</option>
+                        <option value={1e3}>kHz</option>
+                        <option value={1e6}>MHz</option>
+                      </select>
+                    </div>
+                  </div>
                 )}
 
                 {sel.kind === 'comp' && sel.type === 'CHIP' && sel.chipId && lib[sel.chipId] && !isVhdlChip(lib[sel.chipId]) && (
@@ -1455,6 +1500,15 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
                           title="Open the chip's circuit in an editor tab">Edit internals…</button>
                       </>
                     )}
+                  </div>
+                )}
+
+                {sel.kind === 'comp' && sel.type && (sel.type === 'CHIP' || isBusToolType(sel.type)) && (
+                  <div className="side-actions">
+                    <button className="tbtn" onClick={() => openPinEdit(sel.id)}
+                      title="Rearrange this part's pins on any edge and resize its body — only this placed copy changes">
+                      Adjust pin locations…
+                    </button>
                   </div>
                 )}
 
@@ -1662,39 +1716,60 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       </AnimatePresence>
 
       <AnimatePresence>
-        {busEdit && (
-          <Modal key="busedit" className="savechipdialog"
-            label={`${busEdit.type === 'COMB' ? 'Bit combiner' : 'Splitter'} — pins & size`}
-            onDismiss={() => setBusEdit(null)}>
-            <h2>{busEdit.type === 'COMB' ? 'Bit combiner' : 'Splitter'} pins</h2>
-            <p>
-              Drag pins to any edge to reassign their locations, drag labels to nudge names,
-              and use the size buttons to resize the body — just like a custom chip.
-            </p>
-            <PinLayoutEditor
-              inputs={busEdit.type === 'COMB'
-                ? Array.from({ length: busEdit.nIns }, (_, i) => ({ name: bitWeightName(busEdit.nIns, i), bits: 1 }))
-                : [{ name: 'BUS', bits: busEdit.nIns }]}
-              outputs={busEdit.type === 'COMB'
-                ? [{ name: 'BUS', bits: busEdit.nIns }]
-                : Array.from({ length: busEdit.nIns }, (_, i) => ({ name: bitWeightName(busEdit.nIns, i), bits: 1 }))}
-              name={busEdit.type === 'COMB' ? 'COMBINE' : 'SPLIT'}
-              layout={busEdit.layout}
-              onChange={l => setBusEdit({ ...busEdit, layout: l })}
-            />
-            <div className="dialog-actions">
-              <button className="tbtn"
-                onClick={() => setBusEdit({ ...busEdit, layout: busToolLayout(busEdit.type, busEdit.nIns) })}
-                title="Put the pins back in their default positions">Reset layout</button>
-              <div className="spacer" />
-              <button className="tbtn" onClick={() => setBusEdit(null)}>Cancel</button>
-              <button className="tbtn primary"
-                onClick={() => { api().setBusLayout(busEdit.id, busEdit.layout); setBusEdit(null); }}>
-                Apply
-              </button>
-            </div>
-          </Modal>
-        )}
+        {pinEdit && (() => {
+          const def = pinEdit.chipId ? lib[pinEdit.chipId] : undefined;
+          const isBus = isBusToolType(pinEdit.type);
+          const n = pinEdit.nIns ?? 4;
+          const bitPins = Array.from({ length: n }, (_, i) => ({ name: bitWeightName(n, i), bits: 1 }));
+          const busPin = [{ name: 'BUS', bits: n }];
+          const inputs = pinEdit.type === 'COMB' ? bitPins
+            : pinEdit.type === 'SPLIT' ? busPin
+            : (def?.inputs ?? []).map((name, i) => ({ name, bits: def?.inputBits?.[i] ?? 1 }));
+          const outputs = pinEdit.type === 'COMB' ? busPin
+            : pinEdit.type === 'SPLIT' ? bitPins
+            : (def?.outputs ?? []).map((name, i) => ({ name, bits: def?.outputBits?.[i] ?? 1 }));
+          const name = pinEdit.type === 'COMB' ? 'COMBINE' : pinEdit.type === 'SPLIT' ? 'SPLIT' : (def?.name ?? 'Chip');
+          const defaultLayout = () => isBus
+            ? busToolLayout(pinEdit.type, n)
+            : def?.layout ?? defaultChipLayout(inputs.length, outputs.length, name.length);
+          return (
+            <Modal key="pinedit" className="savechipdialog"
+              label={`${name} — adjust pin locations`}
+              onDismiss={() => setPinEdit(null)}>
+              <h2>Adjust pin locations — {name}</h2>
+              <p>
+                Drag pins to any edge to reassign their locations, drag labels to nudge names,
+                and use the size buttons to resize the body. Changes apply <b>only to this placed
+                part</b>{pinEdit.type === 'CHIP' ? ' — the chip in your palette keeps its own package' : ''}.
+              </p>
+              <PinLayoutEditor
+                inputs={inputs}
+                outputs={outputs}
+                name={name}
+                layout={pinEdit.layout}
+                onChange={l => setPinEdit({ ...pinEdit, layout: l })}
+              />
+              <div className="dialog-actions">
+                <button className="tbtn"
+                  onClick={() => setPinEdit({ ...pinEdit, layout: defaultLayout() })}
+                  title="Put the pins back in their default positions">Reset layout</button>
+                {pinEdit.hasOverride && (
+                  <button className="tbtn"
+                    onClick={() => { api().setCompLayout(pinEdit.id, null); setPinEdit(null); }}
+                    title="Remove this part's local pin layout and follow the default again">
+                    Remove local layout
+                  </button>
+                )}
+                <div className="spacer" />
+                <button className="tbtn" onClick={() => setPinEdit(null)}>Cancel</button>
+                <button className="tbtn primary"
+                  onClick={() => { api().setCompLayout(pinEdit.id, pinEdit.layout); setPinEdit(null); }}>
+                  Apply
+                </button>
+              </div>
+            </Modal>
+          );
+        })()}
       </AnimatePresence>
 
       <AnimatePresence>

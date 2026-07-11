@@ -54,7 +54,7 @@ Install `playwright` in a scratch dir and launch with the pre-installed browser:
 
 1. Wire a switch to an LED at the same y (perfectly straight, one `M… L…` segment) and toggle it high — the wire must stay visible.
 2. Fan one output into 2+ wires — expect a `.junction` dot at the pin.
-3. Select a gate → sidebar `#ningrp` sets 2–4 inputs; select a Clock → `#freqgrp` sets Hz.
+3. Select a gate → sidebar `#ningrp` sets 2–4 inputs; select a Clock → the Frequency field + Hz/kHz/MHz unit select sets its speed.
 4. IPIN/OPIN → "Save as chip" (pick a package shape / drag pins to any edge) → place from palette → pin labels appear on the chip; drag the corner grip to resize.
 5. Fresh visitor (no localStorage) gets the SR-latch seed board; pressing SET latches Q.
 6. Double-click a placed custom chip → `.peekdialog` live view lights internal wires per the instance's inputs; "Package & pins" tab edits layout/shape.

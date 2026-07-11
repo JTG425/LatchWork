@@ -10,7 +10,7 @@
     ChipLayout, cloneChipLayout, resizeBusLayout, busToolMinW, busToolMinH,
     SimState, newSimState, getGeom, evaluateNet, analyzeNets,
     normalizeWires, isPinEnd, isAttachEnd, tunnelPinGroups,
-    MULTI_IN_GATES, clampGateIns, clampFreq, clampBits, CHIP_MIN_W, chipMinH,
+    MULTI_IN_GATES, clampGateIns, clampFreq, formatFreq, clampBits, CHIP_MIN_W, chipMinH,
     maskVal, storeVal, formatBusValue,
     SEG_NAMES, edgeableComp, defaultEdgeForComp, isMemoryType, isBusToolType, chipLabelOffset,
     wireRouteCorners, wireCornerPath, wireEndFacing, chipBodyPath,
@@ -80,8 +80,10 @@
     setFreq(id: string, hz: number): void;
     setEdge(id: string, edge: EdgeMode | null): void;
     setWireBits(id: string, bits: number): void;
-    /* COMB/SPLIT: apply a custom pin layout (pins on any edge + body size) */
-    setBusLayout(id: string, layout: ChipLayout): void;
+    /* COMB/SPLIT/CHIP: apply a custom pin layout to one placed part
+       (pins on any edge + body size). Local to the instance — a chip's
+       library definition is untouched. Pass null to drop the override. */
+    setCompLayout(id: string, layout: ChipLayout | null): void;
     /* re-seed every wire's bus width from the pins it touches — call after
        a chip definition's pin widths change */
     refreshWireBits(): void;
@@ -98,6 +100,12 @@
     getTiming(): { paused: boolean; traces: TimingTrace[] };
     setTimingPaused(paused: boolean): void;
     clearTiming(): void;
+    /* fastest clock anywhere on the board (Hz), incl. inside placed chips */
+    maxClockHz(): number | null;
+    /* timing diagram "fixed length" mode: re-simulate the board from
+       power-on over a virtual time span (ms, fractional for ns runs)
+       and return the probed signals' change points on a t=0 base */
+    runFixedSim(durationMs: number): { traces: TimingTrace[]; duration: number; truncated: boolean };
     rerender(): void;
     destroy(): void;
   }
@@ -321,9 +329,9 @@
     let timingPaused = false;
     const TRACE_CAP = 4000;
     const traces = new Map<string, TimingTrace>();
-    function probeSignal(c: Comp): { v: bigint; bits: number } | null {
+    function probeSignal(c: Comp, state: SimState): { v: bigint; bits: number } | null {
       const g = getGeom(c, lib());
-      if (g.outs.length) return { v: sim.vals[c.id + ':0'] ?? 0n, bits: g.outs[0].bits ?? 1 };
+      if (g.outs.length) return { v: state.vals[c.id + ':0'] ?? 0n, bits: g.outs[0].bits ?? 1 };
       if (g.ins.length) return { v: c._ins?.[0] ?? 0n, bits: g.ins[0].bits ?? 1 };
       return null;
     }
@@ -333,7 +341,7 @@
       const live = new Set<string>();
       for (const c of comps) {
         if (!c.probe) continue;
-        const s = probeSignal(c);
+        const s = probeSignal(c, sim);
         if (!s) continue;
         live.add(c.id);
         let tr = traces.get(c.id);
@@ -349,6 +357,62 @@
       if (traces.size > live.size) {
         for (const id of [...traces.keys()]) if (!live.has(id)) traces.delete(id);
       }
+    }
+
+    /* ── fixed-length virtual-time simulation ──
+       Re-runs the board from power-on over a virtual span, stepping at
+       every clock half-period boundary — so MHz clocks resolve exactly
+       even though the live canvas can't tick that fast. Runs on a
+       cloned board + fresh state; the live simulation is untouched. */
+    const FIXED_SIM_MAX_EVENTS = 20000;
+    function collectClockHalves(cs: Comp[], depth: number, out: number[]) {
+      if (depth > 6) return;
+      for (const c of cs) {
+        if (c.type === 'CLK') out.push(500 / clampFreq(c.freq));
+        else if (c.type === 'CHIP' && c.chipId) {
+          const d = lib()[c.chipId];
+          if (d) collectClockHalves(d.comps, depth + 1, out);
+        }
+      }
+    }
+    function runFixedSim(durationMs: number): { traces: TimingTrace[]; duration: number; truncated: boolean } {
+      const span = Math.max(1e-9, durationMs);
+      const board = cloneBoard({ comps, wires });   // keeps probe flags, drops live state
+      const st = newSimState();
+      const halves: number[] = [];
+      collectClockHalves(board.comps, 0, halves);
+
+      // cap the run so pathological clock/length combos stay responsive
+      const eventsPerMs = halves.reduce((s, h) => s + 1 / h, 0);
+      const truncated = eventsPerMs * span > FIXED_SIM_MAX_EVENTS;
+      const end = truncated ? FIXED_SIM_MAX_EVENTS / eventsPerMs : span;
+
+      const times = new Set<number>([0, end]);
+      for (const h of halves) {
+        for (let k = 1; k * h < end; k++) times.add(k * h);
+      }
+      const sorted = [...times].sort((a, b) => a - b);
+      // evaluate a hair after each boundary so float error in k·h never
+      // lands the clock on the wrong side of its own edge
+      const eps = halves.length ? Math.min(...halves) * 1e-6 : 0;
+
+      const run = new Map<string, TimingTrace>();
+      for (const t of sorted) {
+        evaluateNet(board.comps, board.wires, st, lib(), undefined, 0, t + eps);
+        for (const c of board.comps) {
+          if (!c.probe) continue;
+          const s = probeSignal(c, st);
+          if (!s) continue;
+          let tr = run.get(c.id);
+          if (!tr) {
+            tr = { id: c.id, name: (c.label || '').trim() || getGeom(c, lib()).name, bits: s.bits, pts: [] };
+            run.set(c.id, tr);
+          }
+          const last = tr.pts[tr.pts.length - 1];
+          if (!last || last.v !== s.v) tr.pts.push({ t, v: s.v });
+        }
+      }
+      return { traces: [...run.values()], duration: end, truncated };
     }
 
     /* ── rendering ── */
@@ -426,7 +490,7 @@
         inner = `<rect class="body" x="0" y="0" width="60" height="40" rx="9"/>
           <path d="M10,${on ? 13 : 27} H19 V${on ? 27 : 13} H29 V${on ? 13 : 27} H39 V${on ? 27 : 13} H49"
             fill="none" stroke="${on ? 'var(--hi)' : 'var(--muted)'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
-          caption(`${c.label || 'CLK'} · ${clampFreq(c.freq)}Hz`, 30, 52);
+          caption(`${c.label || 'CLK'} · ${formatFreq(c.freq)}`, 30, 52);
       } else if (c.type === 'IPIN') {
         const n = clampBits(c.bits ?? 1);
         const v = n > 1 ? maskVal(c.val, n) : (c.on ? 1n : 0n);
@@ -525,9 +589,13 @@
         if (edgeLabel) inner += caption(edgeLabel, g.w / 2, g.h + 14);
       } else if (c.type === 'CHIP') {
         const chipDef = c.chipId ? lib()[c.chipId] : undefined;
+        // the instance's own pin layout (if valid) wins over the package's
+        const instL = c.layout && chipDef
+          && c.layout.ins.length === chipDef.inputs.length
+          && c.layout.outs.length === chipDef.outputs.length ? c.layout : undefined;
         // edge-aware label placement so layout pins on any edge read right
         const pinLabel = (p: Vec & { name?: string }, i: number, side: 'in' | 'out') => {
-          const off = chipDef ? chipLabelOffset(chipDef, side, i) : { lx: 0, ly: 0 };
+          const off = chipDef ? chipLabelOffset(chipDef, side, i, instL) : { lx: 0, ly: 0 };
           if (p.y < 0 || p.y > g.h) {
             const by = p.y < 0 ? 13 : g.h - 7;
             return `<text class="pinname" x="${p.x + off.lx}" y="${by + off.ly}" text-anchor="middle"${ctr(p.x, by)}>${esc(p.name || '')}</text>`;
@@ -633,12 +701,14 @@
       }
 
       // wire-placement cursor: a glowing, enlarged grid dot showing exactly
-      // where the next click lands — snapped onto a hovered wire when splitting
+      // where the next click lands — snapped onto a hovered wire when splitting.
+      // LTSpice-style dashed crosshair marks the grid row & column it's on.
       if ((wireTool || wiring) && lastPt.over && !drag && !pan && !marquee) {
         const base = wiring ? { x: wiring.mx, y: wiring.my } : { x: lastPt.x, y: lastPt.y };
         const hw = hoverWire ? wires.find(w => w.id === hoverWire) : null;
         const c = hw ? attachPointOnWire(hw, base) : { x: snap(base.x), y: snap(base.y) };
-        out += `<circle class="wirecursor-halo" cx="${c.x}" cy="${c.y}" r="10"/>
+        out += `<path class="wirecrosshair" d="M-20000,${c.y} H20000 M${c.x},-20000 V20000"/>
+                <circle class="wirecursor-halo" cx="${c.x}" cy="${c.y}" r="10"/>
                 <circle class="wirecursor" cx="${c.x}" cy="${c.y}" r="4.5"/>`;
       }
 
@@ -957,7 +1027,7 @@
         let minW = CHIP_MIN_W, minH = GRID * 2;
         if (c.type === 'CHIP') {
           const def = c.chipId ? lib()[c.chipId] : undefined;
-          if (def) minH = chipMinH(def);
+          if (def) minH = c.layout ? GRID * 2 : chipMinH(def);
         } else if (isBusToolType(c.type)) {
           minW = busToolMinW(c.type);
           minH = busToolMinH(c);
@@ -1252,12 +1322,19 @@
         if (selWire === id) emitSel();
         refresh();
       },
-      setBusLayout(id, layout) {
+      setCompLayout(id, layout) {
         const c = find(id);
-        if (!c || !isBusToolType(c.type)) return;
-        c.layout = cloneChipLayout(layout);
-        c.w = layout.w * GRID;
-        c.h = layout.h * GRID;
+        if (!c || !(isBusToolType(c.type) || c.type === 'CHIP')) return;
+        if (layout) {
+          c.layout = cloneChipLayout(layout);
+          c.w = layout.w * GRID;
+          c.h = layout.h * GRID;
+        } else {
+          // back to the library package / auto layout and size
+          delete c.layout;
+          delete c.w;
+          delete c.h;
+        }
         refresh();
       },
       refreshWireBits() {
@@ -1301,6 +1378,12 @@
       },
       setTimingPaused(paused) { timingPaused = paused; },
       clearTiming() { traces.clear(); },
+      maxClockHz() {
+        const halves: number[] = [];
+        collectClockHalves(comps, 0, halves);
+        return halves.length ? 500 / Math.min(...halves) : null;
+      },
+      runFixedSim,
       removeChipInstances(chipId) {
         const doomed = new Set(comps.filter(c => c.chipId === chipId).map(c => c.id));
         if (!doomed.size) { refresh(false); return; }
