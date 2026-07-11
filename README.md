@@ -11,6 +11,9 @@ This zip is configured to use Auth0 only. NextAuth and GitHub OAuth have been re
 
 ## Workbench features
 
+- **VHDL modules** — the *VHDL* titlebar button opens a code editor for a synthesizable VHDL subset (entity/ports incl. `std_logic_vector` buses, concurrent + conditional + selected assignments, processes with `rising_edge`/`falling_edge`, if/case, enum state types, generics with defaults, unsigned arithmetic). Compile errors show live with line numbers; saving turns the entity into a chip whose pins are the ports. VHDL chips simulate through the compiled module (`lib/vhdl.ts`), get truth-table/FSM analysis like any chip, and double-clicking them (canvas or palette) reopens the code editor.
+- **Timing diagram** — the *Timing* titlebar button docks a waveform panel above the tab bar. Select any part and tick *Plot in timing diagram* to record it (first output pin, or first input for LEDs/output pins): 1-bit signals draw as square waves, buses as value lanes with binary/hex labels. Pause/resume, clear, and zoom the time window (1s–60s); probed parts show a small flag on the canvas.
+- **Gates** — AND, OR, NOT, Buffer, NAND, NOR, XOR, XNOR; multi-input gates take 2–32 inputs and all gates operate bitwise across buses up to 64 bits.
 - **7-segment display** — a one-digit display under *Output* with 8 pins (segments `a`–`g` + `dp`), each driven directly by a 1-bit signal.
 - **Buses** — select any wire to set how many bits it carries from the titlebar number input; multi-bit wires draw thicker and show a live binary readout. Wires started from a bus pin pick up its width automatically.
 - **Bit combiner and splitter** — the combiner packs N individual bits (MSB on top) into an N-bit bus, and the splitter expands an N-bit bus back into individual weighted bits.

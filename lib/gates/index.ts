@@ -7,14 +7,16 @@ import { GateDef } from './types';
 import { AND } from './and';
 import { OR } from './or';
 import { NOT } from './not';
+import { BUF } from './buf';
 import { NAND } from './nand';
 import { NOR } from './nor';
 import { XOR } from './xor';
+import { XNOR } from './xnor';
 
 export type { GateDef, GatePin, GateBubble } from './types';
 
 /* Key = the gate's CompType string; order here is palette order. */
-export const GATE_DEFS = { AND, OR, NOT, NAND, NOR, XOR } satisfies Record<string, GateDef>;
+export const GATE_DEFS = { AND, OR, NOT, BUF, NAND, NOR, XOR, XNOR } satisfies Record<string, GateDef>;
 
 export type GateType = keyof typeof GATE_DEFS;
 
