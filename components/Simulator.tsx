@@ -8,7 +8,7 @@ import {
   makeChipDef, validateChipSource, chipUsedBy, migrateChipDef, chipDefContains,
   isMemoryType, isBusToolType, MAX_WIRE_BITS, MAX_GATE_INS, BINARY_VALUE_MAX_BITS, clampBits,
   chipPinSources, chipPinName, defaultChipLayout, cloneBoard, sanitizeChipDef,
-  busToolLayout, bitWeightName, chipUniformBits, scaleChipDefBits, isVhdlChip,
+  busToolLayout, bitWeightName, chipUniformBits, scaleChipDefBits, isVhdlChip, makeVhdlChipDef,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
@@ -16,9 +16,10 @@ import PinLayoutEditor, { LayoutPin } from '@/components/PinLayoutEditor';
 import PeekDialog, { ChipPackageEditor } from '@/components/PeekDialog';
 import CommunityDialog from '@/components/CommunityDialog';
 import ChipAnalysis, { ChipPreview } from '@/components/ChipAnalysis';
-import VhdlDialog from '@/components/VhdlDialog';
+import VhdlEditor from '@/components/VhdlEditor';
 import TimingPanel from '@/components/TimingPanel';
 import LogoMark from '@/components/Logo';
+import { VHDL_TEMPLATE, VhdlModule } from '@/lib/vhdl';
 
 const LS_BOARD = 'latchwork.board.v1';   // legacy single-board key, migrated into tabs
 const LS_CHIPS = 'latchwork.chips.v1';
@@ -42,10 +43,13 @@ const cleanFolderName = (s: string) => s.trim().slice(0, MAX_FOLDER_NAME);
 
 export interface SimUser { id?: string | null; name?: string | null; email?: string | null }
 
-/* One editor canvas. `chipId` marks a tab that edits a chip's internals. */
-interface TabInfo { id: string; name: string; chipId?: string }
-interface TabData extends TabInfo { board: Board }
-const tabMeta = ({ board: _b, ...meta }: TabData): TabInfo => meta;
+/* One editor tab. `chipId` marks a tab that edits a chip's internal
+   circuit; `kind: 'vhdl'` marks a fullscreen VHDL code editor tab
+   (`vhdlChipId` binds it to the library chip it edits once saved —
+   until then it's an unsaved module draft). */
+interface TabInfo { id: string; name: string; chipId?: string; kind?: 'vhdl'; vhdlChipId?: string }
+interface TabData extends TabInfo { board: Board; vhdlSource?: string }
+const tabMeta = ({ board: _b, vhdlSource: _s, ...meta }: TabData): TabInfo => meta;
 const newTabId = () => 'tab_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 /* Starter circuit: SR latch built from NANDs — press SET / RESET
@@ -213,7 +217,6 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   const [editAsk, setEditAsk] = useState<ChipDef | null>(null);
   const [deleteAsk, setDeleteAsk] = useState<ChipDef | null>(null);
   const [peek, setPeek] = useState<{ compId: string; chipId: string } | null>(null);
-  const [vhdlEdit, setVhdlEdit] = useState<{ base?: ChipDef } | null>(null);
   const [timingOpen, setTimingOpen] = useState(false);
   const [busEdit, setBusEdit] = useState<{ id: string; type: 'COMB' | 'SPLIT'; nIns: number; layout: ChipLayout } | null>(null);
   const [folderMenu, setFolderMenu] = useState<string | null>(null);
@@ -290,8 +293,10 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
 
   /* ── tabs ── */
   const syncActiveBoard = useCallback(() => {
+    // VHDL tabs never own the canvas — copying it in would capture
+    // whichever sheet the (hidden) canvas still holds
     const t = tabsRef.current.find(t => t.id === activeTabRef.current);
-    if (t && apiRef.current) t.board = apiRef.current.getBoard();
+    if (t && t.kind !== 'vhdl' && apiRef.current) t.board = apiRef.current.getBoard();
   }, []);
 
   const persistTabs = useCallback(() => {
@@ -312,7 +317,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     syncActiveBoard();
     activeTabRef.current = id;
     setActiveTab(id);
-    apiRef.current!.setBoard(t.board);
+    // a VHDL tab leaves the (hidden) canvas untouched — the next board
+    // tab reloads it
+    if (t.kind !== 'vhdl') apiRef.current!.setBoard(t.board);
     persistTabs();
   }, [syncActiveBoard, persistTabs]);
 
@@ -342,7 +349,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       const next = tabsRef.current[Math.max(0, idx - 1)];
       activeTabRef.current = next.id;
       setActiveTab(next.id);
-      apiRef.current!.setBoard(next.board);
+      if (next.kind !== 'vhdl') apiRef.current!.setBoard(next.board);
     }
     publishTabs();
     persistTabs();
@@ -366,36 +373,80 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     addTab(def.name, cloneBoard({ comps: def.comps, wires: def.wires }), def.id);
   }, [switchTab, addTab]);
 
+  /* Open a fullscreen VHDL editor tab: one per chip (like circuit-edit
+     tabs), and one shared "New VHDL" draft tab for unsaved modules. */
+  const openVhdlTab = useCallback((def?: ChipDef) => {
+    setEditAsk(null);
+    setInspect(null);
+    setPeek(null);
+    const existing = def
+      ? tabsRef.current.find(t => t.vhdlChipId === def.id)
+      : tabsRef.current.find(t => t.kind === 'vhdl' && !t.vhdlChipId);
+    if (existing) { switchTab(existing.id); return; }
+    syncActiveBoard();
+    const t: TabData = {
+      id: newTabId(),
+      name: (def?.name ?? 'New VHDL').slice(0, 20),
+      kind: 'vhdl',
+      ...(def ? { vhdlChipId: def.id } : {}),
+      vhdlSource: def?.vhdl ?? VHDL_TEMPLATE,
+      board: { comps: [], wires: [] },
+    };
+    tabsRef.current.push(t);
+    activeTabRef.current = t.id;
+    setActiveTab(t.id);
+    publishTabs();
+    persistTabs();
+  }, [switchTab, syncActiveBoard, publishTabs, persistTabs]);
+
   /* VHDL chips have no circuit — "edit internals" means editing the code. */
   const askEditChip = useCallback((chipId: string) => {
     const def = chipsRef.current[chipId];
     if (!def) return;
-    if (isVhdlChip(def)) { setInspect(null); setPeek(null); setVhdlEdit({ base: def }); return; }
+    if (isVhdlChip(def)) { openVhdlTab(def); return; }
     setEditAsk(def);
-  }, []);
+  }, [openVhdlTab]);
 
   /* Double-click on a placed chip → peek inside it, live (VHDL → code editor). */
   const openPeek = useCallback((compId: string, chipId: string) => {
     const def = chipsRef.current[chipId];
     if (!def) return;
-    if (isVhdlChip(def)) { setVhdlEdit({ base: def }); return; }
+    if (isVhdlChip(def)) { openVhdlTab(def); return; }
     setPeek({ compId, chipId });
-  }, []);
+  }, [openVhdlTab]);
 
-  /* Save (or re-save) a VHDL module as a library chip. */
-  const saveVhdl = useCallback((def: ChipDef) => {
+  /* Keep the active VHDL tab's draft persisted while typing. */
+  const vhdlSourceChange = useCallback((src: string) => {
+    const t = tabsRef.current.find(t => t.id === activeTabRef.current);
+    if (t?.kind !== 'vhdl') return;
+    t.vhdlSource = src;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(persistTabs, 400);
+  }, [persistTabs]);
+
+  /* Save (or re-save) the active VHDL tab's module as a library chip,
+     then bind the tab to the chip so further saves update it. */
+  const saveVhdlFromTab = useCallback((name: string, source: string, module: VhdlModule) => {
+    const t = tabsRef.current.find(t => t.id === activeTabRef.current);
+    if (t?.kind !== 'vhdl') return;
+    const base = t.vhdlChipId ? chipsRef.current[t.vhdlChipId] : undefined;
+    const def = makeVhdlChipDef(name, source, module, base);
     const exists = !!chipsRef.current[def.id];
     const list = exists
       ? Object.values(chipsRef.current).map(c => (c.id === def.id ? def : c)).sort((a, b) => a.createdAt - b.createdAt)
       : [...Object.values(chipsRef.current).sort((a, b) => a.createdAt - b.createdAt), def];
     setChips(list);
-    setVhdlEdit(null);
+    t.vhdlChipId = def.id;
+    t.vhdlSource = source;
+    t.name = def.name.slice(0, 20);
+    publishTabs();
+    persistTabs();
     // placed copies may have new pin widths — re-seed touching wires
     apiRef.current!.refreshWireBits();
     notify(exists
       ? `Updated “${def.name}” — every placed copy runs the new VHDL.`
       : `Saved “${def.name}” — it’s in your palette under My chips.`);
-  }, [setChips, notify]);
+  }, [setChips, publishTabs, persistTabs, notify]);
 
   /* Double-click on a combiner/splitter → rearrange its pins & size. */
   const openBusEdit = useCallback((compId: string) => {
@@ -524,6 +575,8 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   /* ── actions ── */
   const activeMeta = tabs.find(t => t.id === activeTab);
   const editingChip = activeMeta?.chipId ? chips.find(c => c.id === activeMeta.chipId) : undefined;
+  const activeVhdl = activeMeta?.kind === 'vhdl';
+  const activeVhdlChip = activeVhdl && activeMeta?.vhdlChipId ? chips.find(c => c.id === activeMeta.vhdlChipId) : undefined;
 
   const openSaveChip = () => {
     const board = apiRef.current!.getBoard();
@@ -944,28 +997,33 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         <div id="titletools">
 
         <div id="livedot"><i />Live</div>
-        <div id="zoomgrp">
-          <button onClick={() => api().zoomOut()} title="Zoom out" aria-label="Zoom out">−</button>
-          <div id="zoomlabel" className="mono">{zoom}%</div>
-          <button onClick={() => api().zoomIn()} title="Zoom in" aria-label="Zoom in">+</button>
-        </div>
-        <button className={'tbtn' + (wireTool ? ' on' : '')} aria-pressed={wireTool}
-          title="Wire tool (W) — click any grid dot to start a wire; click an existing wire to split it"
-          onClick={() => api().setWireTool(!wireTool)}>Wire</button>
-        <button className="tbtn" onClick={() => api().resetView()}>Reset view</button>
-        <button className="tbtn" onClick={() => api().powerCycle()} title="Zero every signal and latch, like flipping the power">Power cycle</button>
-        <button className="tbtn danger" onClick={clearBoard}>Clear</button>
+        {!activeVhdl && (
+          <>
+            <div id="zoomgrp">
+              <button onClick={() => api().zoomOut()} title="Zoom out" aria-label="Zoom out">−</button>
+              <div id="zoomlabel" className="mono">{zoom}%</div>
+              <button onClick={() => api().zoomIn()} title="Zoom in" aria-label="Zoom in">+</button>
+            </div>
+            <button className={'tbtn' + (wireTool ? ' on' : '')} aria-pressed={wireTool}
+              title="Wire tool (W) — click any grid dot to start a wire; click an existing wire to split it"
+              onClick={() => api().setWireTool(!wireTool)}>Wire</button>
+            <button className="tbtn" onClick={() => api().resetView()}>Reset view</button>
+            <button className="tbtn" onClick={() => api().powerCycle()} title="Zero every signal and latch, like flipping the power">Power cycle</button>
+            <button className="tbtn danger" onClick={clearBoard}>Clear</button>
+          </>
+        )}
         <button className={'tbtn' + (timingOpen ? ' on' : '')} aria-pressed={timingOpen}
           title="Timing diagram — record and plot signals over time"
           onClick={() => setTimingOpen(o => !o)}>Timing</button>
-        <button className="tbtn" onClick={() => setVhdlEdit({})}
-          title="Write a VHDL entity + architecture and use it as a chip">VHDL</button>
+        <button className={'tbtn' + (activeVhdl ? ' on' : '')}
+          title="Write a VHDL entity + architecture and use it as a chip — opens a fullscreen code editor tab"
+          onClick={() => openVhdlTab()}>VHDL</button>
         <button className="tbtn" onClick={() => setCommunityOpen(true)}
           title="Browse chips shared by other builders — or share your own">Community</button>
-        {editingChip
+        {!activeVhdl && (editingChip
           ? <button className="tbtn primary" onClick={updateChip}
               title={`Apply this circuit as the new internals of “${editingChip.name}”`}>Update chip</button>
-          : <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>}
+          : <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>)}
         {user
           ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a>
           : authEnabled
@@ -974,7 +1032,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         </div>
       </div>
 
-      <div id="main">
+      <div id="main" style={activeVhdl ? { display: 'none' } : undefined} aria-hidden={activeVhdl || undefined}>
         <nav id="palette" aria-label="Component palette" style={{ width: palWidth }}
           className={drag ? 'dragging-chip' : ''}>
           <div id="palsearch">
@@ -1434,6 +1492,16 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         </AnimatePresence>
       </div>
 
+      {activeVhdl && (
+        <VhdlEditor
+          key={activeTab}
+          baseChip={activeVhdlChip}
+          initialSource={tabsRef.current.find(t => t.id === activeTab)?.vhdlSource ?? VHDL_TEMPLATE}
+          onSourceChange={vhdlSourceChange}
+          onSave={saveVhdlFromTab}
+        />
+      )}
+
       <AnimatePresence>
         {timingOpen && <TimingPanel key="timing" api={api} onClose={() => setTimingOpen(false)} />}
       </AnimatePresence>
@@ -1442,11 +1510,13 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         <div className="tabscroll">
           {tabs.map(t => (
             <div key={t.id} role="tab" aria-selected={t.id === activeTab}
-              className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '')}
-              title={t.chipId ? `Editing the internals of “${t.name}” — double-click to rename` : 'Double-click to rename'}
+              className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '') + (t.kind === 'vhdl' ? ' vhdltab' : '')}
+              title={t.kind === 'vhdl'
+                ? `VHDL module editor — double-click to rename`
+                : t.chipId ? `Editing the internals of “${t.name}” — double-click to rename` : 'Double-click to rename'}
               onPointerDown={() => switchTab(t.id)}
               onDoubleClick={() => { setRenaming(t.id); setRenameDraft(t.name); }}>
-              {t.chipId && <span className="edtab-dot" aria-hidden="true" />}
+              {(t.chipId || t.kind === 'vhdl') && <span className="edtab-dot" aria-hidden="true" />}
               {renaming === t.id ? (
                 <input
                   autoFocus
@@ -1555,17 +1625,6 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
             onSavePackage={pkg => applyChipPackage(peek.chipId, pkg)}
             onEditInternals={() => openChipTab(peekDef)}
             onClose={() => setPeek(null)}
-          />
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {vhdlEdit && (
-          <VhdlDialog
-            key="vhdl"
-            base={vhdlEdit.base}
-            onSave={saveVhdl}
-            onClose={() => setVhdlEdit(null)}
           />
         )}
       </AnimatePresence>
