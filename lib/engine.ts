@@ -11,12 +11,16 @@ const midRow = (h: number) => snapG(h / 2);
    SSEG = one-digit 7-segment display (8 segment inputs, a–g + dp),
    COMB = bit combiner (N individual bits → one N-bit bus, MSB first),
    SPLIT = bus splitter (one N-bit bus → N individual bits, MSB first),
-   TUN  = tunnel (named wireless net link). */
+   TUN  = tunnel (named wireless net link).
+   NOTE / RECT / TABLE = canvas notations — free text, a translucent
+   highlight shape, and an editable truth table. Pinless, never
+   simulated, drawn behind the circuit. */
 export type CompType =
   | 'IN' | 'BTN' | 'ONE' | 'CLK' | 'VAL'
   | 'SRLATCH' | 'DLATCH' | 'JKFF' | 'DFF' | 'SRFF' | 'TFF' | 'SHIFT'
   | GateType
-  | 'OUT' | 'SSEG' | 'COMB' | 'SPLIT' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP';
+  | 'OUT' | 'SSEG' | 'COMB' | 'SPLIT' | 'TUN' | 'IPIN' | 'OPIN' | 'CHIP'
+  | 'NOTE' | 'RECT' | 'TABLE';
 export type EdgeMode = 'rise' | 'fall';
 
 export interface Vec { x: number; y: number }
@@ -59,8 +63,69 @@ export interface Comp {
   edge?: EdgeMode;         // gates/chips: update only on this clock edge
   clockPin?: number;       // optional explicit clock input index
   probe?: boolean;         // plot this component's signal in the timing diagram
+  /* notations */
+  text?: string;                    // NOTE: the note's text (multi-line)
+  fontSize?: number;                // NOTE: text size in px
+  color?: string;                   // NOTE/RECT/TABLE: accent color (hex)
+  noteShape?: 'rect' | 'ellipse';   // RECT: silhouette (default rectangle)
+  table?: TableData;                // TABLE: cells + input-column divider
   _ins?: bigint[];
 }
+
+/* ── canvas notations ───────────────────────────────────────────────
+   NOTE (free text), RECT (translucent highlight shape), and TABLE
+   (editable truth table). They're ordinary comps — selected, dragged,
+   copied, and persisted like everything else — but carry no pins and
+   render underneath the circuit. */
+export const isNoteType = (type: CompType) =>
+  type === 'NOTE' || type === 'RECT' || type === 'TABLE';
+
+/* Same hues as the palette's folder colors, so highlights and folders
+   speak one visual language. */
+export const NOTE_COLORS = ['#0a84ff', '#30d158', '#ffd60a', '#ff9f0a', '#ff453a', '#ff375f', '#bf5af2', '#64d2ff'];
+export const DEFAULT_NOTE_COLOR = NOTE_COLORS[0];
+
+export const NOTE_MAX_TEXT = 400;
+export const NOTE_FONT_SIZES = [12, 15, 20, 28] as const;
+export const clampNoteFont = (n?: number) =>
+  Math.min(48, Math.max(10, Math.round(Number.isFinite(n) ? n! : 15)));
+
+/* TABLE data: a rectangular grid of strings. Row 0 is the header;
+   `sep` = how many leading columns are inputs (draws the classic
+   truth-table divider after them; 0 = no divider). */
+export interface TableData { cells: string[][]; sep?: number }
+export const TABLE_MAX_COLS = 10, TABLE_MAX_ROWS = 33, TABLE_MAX_CELL = 16;
+export const cloneTable = (t: TableData): TableData => ({
+  cells: t.cells.map(r => [...r]),
+  ...(t.sep != null ? { sep: t.sep } : {}),
+});
+
+/* Rectangularize + clamp arbitrary (possibly hand-edited) table data. */
+export function normalizeTable(t?: Partial<TableData> | null): TableData {
+  const rows = Array.isArray(t?.cells) ? t!.cells!.slice(0, TABLE_MAX_ROWS) : [];
+  const nCols = Math.min(TABLE_MAX_COLS, Math.max(1, ...rows.map(r => (Array.isArray(r) ? r.length : 0))));
+  const cells = (rows.length ? rows : [['']]).map(r =>
+    Array.from({ length: nCols }, (_, j) => String((Array.isArray(r) ? r[j] : '') ?? '').slice(0, TABLE_MAX_CELL)));
+  const sep = Math.max(0, Math.min(cells[0].length, Math.round(t?.sep ?? 0)));
+  return { cells, ...(sep ? { sep } : {}) };
+}
+
+/* The starter table a placed TABLE stamps: a 2-input truth table with
+   an empty output column, ready to fill in. */
+export const defaultTruthTable = (): TableData => ({
+  cells: [
+    ['A', 'B', 'OUT'],
+    ['0', '0', ''], ['0', '1', ''], ['1', '0', ''], ['1', '1', ''],
+  ],
+  sep: 2,
+});
+
+/* Table drawing metrics — shared by geometry, canvas markup, and the
+   static chip previews so they always agree. */
+export const TABLE_ROW_H = 24;
+export const tableColWidths = (t: TableData): number[] =>
+  t.cells[0].map((_, j) =>
+    Math.max(34, Math.max(...t.cells.map(r => (r[j] ?? '').length)) * 7.5 + 18));
 
 /* ── bus values ─────────────────────────────────────────────────────
    Signals are bigints so 64-bit buses stay exact (JS numbers lose
@@ -247,6 +312,7 @@ const cloneCompForSave = (c: Comp): Comp => {
   const { _ins, ...rest } = c;
   const out: Comp = { ...rest };
   if (c.layout) out.layout = cloneChipLayout(c.layout);
+  if (c.table) out.table = cloneTable(c.table);
   const rawVal = (c as Comp & { val?: number | string | bigint }).val;
   if (typeof rawVal === 'bigint') out.val = storeVal(maskVal(rawVal, clampBits(out.bits ?? 1)));
   return out;
@@ -480,6 +546,9 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
   TUN: { name: 'Tunnel', sub: 'named link', w: 80, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
   IPIN: { name: 'Input pin', sub: 'chip input', w: 40, h: 40, ins: [], outs: [{ x: 60, y: 20 }] },
   OPIN: { name: 'Output pin', sub: 'chip output', w: 40, h: 40, ins: [{ x: -20, y: 20 }], outs: [] },
+  NOTE: { name: 'Text', sub: 'canvas note', w: 80, h: 28, ins: [], outs: [] },
+  RECT: { name: 'Highlight', sub: 'colored backdrop', w: 240, h: 160, ins: [], outs: [] },
+  TABLE: { name: 'Truth table', sub: 'editable grid', w: 140, h: 120, ins: [], outs: [] },
 };
 
 export const PALETTE_ORDER: [string, CompType[]][] = [
@@ -489,6 +558,7 @@ export const PALETTE_ORDER: [string, CompType[]][] = [
   ['Output', ['OUT', 'SSEG']],
   ['Bus & routing', ['COMB', 'SPLIT', 'TUN']],
   ['Chip pins', ['IPIN', 'OPIN']],
+  ['Notation', ['NOTE', 'RECT', 'TABLE']],
 ];
 
 /* Gates whose input count can be edited (NOT is always 1-in) */
@@ -623,7 +693,45 @@ const bitRows = (n: number, h: number, x: number): Pin[] =>
 export const pinPortW = (n: number) =>
   Math.max(40, Math.ceil((busTextChars(clampBits(n)) * 9 + 20) / GRID) * GRID);
 
-export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' | 'h' | 'layout'>, lib: ChipLib): CompGeom {
+/* NOTE text metrics — geometry, canvas markup, and previews all read
+   the same numbers so the hit box always wraps the drawn text. The
+   note renders in the app's monospace stack, so character width is a
+   fixed fraction of the font size. */
+export interface NoteMetrics { lines: string[]; fs: number; lineH: number; pad: number; w: number; h: number }
+export function noteMetrics(c: Pick<Comp, 'text' | 'fontSize'>): NoteMetrics {
+  const raw = (c.text ?? '').replace(/\r/g, '');
+  const lines = (raw || 'text…').split('\n').slice(0, 24);
+  const fs = clampNoteFont(c.fontSize);
+  const lineH = Math.round(fs * 1.35);
+  const pad = 6;
+  const maxLen = Math.max(1, ...lines.map(l => l.length));
+  return {
+    lines, fs, lineH, pad,
+    w: Math.ceil(maxLen * fs * 0.62) + pad * 2,
+    h: lines.length * lineH + pad * 2,
+  };
+}
+
+export const RECT_MIN = GRID * 2;
+
+export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' | 'h' | 'layout' | 'text' | 'fontSize' | 'table'>, lib: ChipLib): CompGeom {
+  if (c.type === 'NOTE') {
+    const m = noteMetrics(c);
+    return { ...PRIM.NOTE, w: m.w, h: m.h };
+  }
+  if (c.type === 'RECT') {
+    return {
+      ...PRIM.RECT,
+      w: Math.max(RECT_MIN, snapG(c.w ?? PRIM.RECT.w)),
+      h: Math.max(RECT_MIN, snapG(c.h ?? PRIM.RECT.h)),
+    };
+  }
+  if (c.type === 'TABLE') {
+    const t = normalizeTable(c.table ?? defaultTruthTable());
+    const w = tableColWidths(t).reduce((s, v) => s + v, 0);
+    return { ...PRIM.TABLE, w, h: t.cells.length * TABLE_ROW_H };
+  }
+
   if (c.type === 'CHIP') {
     const def = c.chipId ? lib[c.chipId] : undefined;
     if (def) return chipGeom(def, c.w, c.h, c.layout);
