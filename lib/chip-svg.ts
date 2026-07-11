@@ -189,8 +189,12 @@ function compMarkup(c: Comp, lib: ChipLib, lv?: LiveVals): string {
     if (edge) inner += caption(`${edge} edge`, g.w / 2, g.h + 14);
   } else if (c.type === 'CHIP') {
     const chipDef = c.chipId ? lib[c.chipId] : undefined;
+    // a placed instance's own pin layout (if valid) wins over the package's
+    const instL = c.layout && chipDef
+      && c.layout.ins.length === chipDef.inputs.length
+      && c.layout.outs.length === chipDef.outputs.length ? c.layout : undefined;
     const pinLabel = (p: Vec & { name?: string }, i: number, side: 'in' | 'out') => {
-      const off = chipDef ? chipLabelOffset(chipDef, side, i) : { lx: 0, ly: 0 };
+      const off = chipDef ? chipLabelOffset(chipDef, side, i, instL) : { lx: 0, ly: 0 };
       if (p.y < 0 || p.y > g.h) {
         const by = p.y < 0 ? 13 : g.h - 7;
         return `<text class="pinname" x="${p.x + off.lx}" y="${by + off.ly}" text-anchor="middle"${ctr(p.x, by)}>${esc(p.name || '')}</text>`;

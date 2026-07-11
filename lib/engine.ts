@@ -54,7 +54,7 @@ export interface Comp {
   bits?: number;          // IPIN/OPIN/VAL: pin bus width; gates & memory: bitwise data width (1-64)
   val?: number | string;  // VAL / multi-bit IPIN: the driven bus value (string beyond 2⁵³)
   w?: number; h?: number; // chips & bus tools: user-resized body, grid multiples
-  layout?: ChipLayout;    // COMB/SPLIT: per-instance pin placement (default auto)
+  layout?: ChipLayout;    // COMB/SPLIT/CHIP: per-instance pin placement (default auto / chip package)
   freq?: number;          // CLK: full cycles per second
   edge?: EdgeMode;         // gates/chips: update only on this clock edge
   clockPin?: number;       // optional explicit clock input index
@@ -512,8 +512,20 @@ export const CHIP_MIN_W = 80;
 export const chipMinH = (def: ChipDef) =>
   def.layout ? GRID * 2 : (Math.max(def.inputs.length, def.outputs.length, 1) + 1) * GRID;
 
-export const CLK_MIN_HZ = 0.1, CLK_MAX_HZ = 20;
+/* Clocks range from slow demo speeds up to MHz rates. Live wall-clock
+   simulation only resolves a few tens of hertz — faster clocks are
+   meant for the timing diagram's fixed-length virtual-time runs. */
+export const CLK_MIN_HZ = 0.1, CLK_MAX_HZ = 100e6;
 export const clampFreq = (hz?: number) => Math.min(CLK_MAX_HZ, Math.max(CLK_MIN_HZ, hz ?? 1));
+
+/* "2.5Hz" / "10kHz" / "1MHz" — the unit a frequency reads best in. */
+export const formatFreq = (hz?: number): string => {
+  const f = clampFreq(hz);
+  const fmt = (v: number) => String(+v.toFixed(3));
+  if (f >= 1e6) return `${fmt(f / 1e6)}MHz`;
+  if (f >= 1e3) return `${fmt(f / 1e3)}kHz`;
+  return `${fmt(f)}Hz`;
+};
 
 /* Pin positions from user-authored slots: pins on any of the four
    edges at explicit grid slots. Shared by chips and the bus tools. */
@@ -530,15 +542,19 @@ export function pinsFromSlots(slots: PinSlot[], names: (string | undefined)[], b
   });
 }
 
-export function chipGeom(def: ChipDef, ow?: number, oh?: number): CompGeom {
+export function chipGeom(def: ChipDef, ow?: number, oh?: number, instLayout?: ChipLayout): CompGeom {
   const inBits = chipInputBits(def), outBits = chipOutputBits(def);
   const sub = `${def.inputs.length} in · ${def.outputs.length} out`;
   const withBits = (p: Pin, bits: number): Pin => (bits > 1 ? { ...p, bits } : p);
 
   // User-authored layout: pins on any of the four edges at explicit
   // grid slots, with label nudges. The edge also anchors the label.
-  if (def.layout) {
-    const L = def.layout;
+  // A placed instance's own layout (Comp.layout) overrides the
+  // library-wide one — pin moves stay local to that copy.
+  const layout = instLayout && instLayout.ins.length === def.inputs.length
+    && instLayout.outs.length === def.outputs.length ? instLayout : def.layout;
+  if (layout) {
+    const L = layout;
     const w = Math.max(CHIP_MIN_W, Math.round((ow ?? L.w * GRID) / GRID) * GRID);
     const h = Math.max(GRID * 2, Math.round((oh ?? L.h * GRID) / GRID) * GRID);
     return {
@@ -560,9 +576,10 @@ export function chipGeom(def: ChipDef, ow?: number, oh?: number): CompGeom {
 }
 
 /* Where a pin's name label sits given its side (label anchoring uses
-   pin.x sign in the renderers). Returned offsets come from the layout. */
-export function chipLabelOffset(def: ChipDef, side: 'in' | 'out', idx: number): { lx: number; ly: number } {
-  const slot = def.layout?.[side === 'in' ? 'ins' : 'outs']?.[idx];
+   pin.x sign in the renderers). Returned offsets come from the layout —
+   a placed instance's own layout wins over the library one. */
+export function chipLabelOffset(def: ChipDef, side: 'in' | 'out', idx: number, instLayout?: ChipLayout): { lx: number; ly: number } {
+  const slot = (instLayout ?? def.layout)?.[side === 'in' ? 'ins' : 'outs']?.[idx];
   return { lx: slot?.lx ?? 0, ly: slot?.ly ?? 0 };
 }
 
@@ -609,7 +626,7 @@ export const pinPortW = (n: number) =>
 export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' | 'h' | 'layout'>, lib: ChipLib): CompGeom {
   if (c.type === 'CHIP') {
     const def = c.chipId ? lib[c.chipId] : undefined;
-    if (def) return chipGeom(def, c.w, c.h);
+    if (def) return chipGeom(def, c.w, c.h, c.layout);
     return { name: '?', sub: 'missing chip', w: 100, h: 40, ins: [], outs: [] };
   }
 
