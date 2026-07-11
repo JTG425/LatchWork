@@ -1071,6 +1071,8 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   /* ── render ── */
   return (
     <div id="app" className={drag ? 'dragging' : ''}>
+      <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2632420782943202"
+     crossOrigin="anonymous"></script>
       <div id="titlebar">
         <div id="appname"><LogoMark size={22} />Latchwork<em>digital logic workbench</em></div>
         <div id="titletools">
