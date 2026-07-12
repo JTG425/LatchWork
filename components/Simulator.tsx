@@ -32,6 +32,22 @@ const LS_FOLDERS = 'latchwork.folders.v1'; // { [name]: { color?: hex } } — ke
 const PAL_MIN_W = 120, PAL_MAX_W = 420, PAL_DEF_W = 186;
 const clampPalW = (w: number) => Math.min(PAL_MAX_W, Math.max(PAL_MIN_W, Math.round(w)));
 
+/* Mobile layout (screens under 650px): the titlebar collapses into a
+   dropdown menu, the palette becomes a bottom drawer, and the inspector
+   slides up as a bottom sheet. Must match the CSS breakpoint. */
+const MOBILE_QUERY = '(max-width: 649.98px)';
+function useIsMobile() {
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE_QUERY);
+    const update = () => setMobile(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
+  return mobile;
+}
+
 /* Inspector value drafts: binary up to BINARY_VALUE_MAX_BITS, hex (no 0x prefix) beyond. */
 const hexDigits = (bits: number) => Math.ceil(bits / 4);
 const useHexValue = (bits: number) => bits > BINARY_VALUE_MAX_BITS;
@@ -263,6 +279,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   const [renameDraft, setRenameDraft] = useState('');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [palWidth, setPalWidth] = useState(PAL_DEF_W);
+  const isMobile = useIsMobile();
+  const [menuOpen, setMenuOpen] = useState(false);      // mobile titlebar dropdown
+  const [drawerOpen, setDrawerOpen] = useState(false);  // mobile component drawer
   const collapsedRef = useRef<Record<string, boolean>>({});
   const palWidthRef = useRef(PAL_DEF_W);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -541,7 +560,8 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       },
       onCounts: setCounts,
       onZoom: setZoom,
-      onPlacing: setArmed,
+      // arming a part closes the mobile drawer so the canvas is visible to stamp on
+      onPlacing: p => { setArmed(p); if (p) setDrawerOpen(false); },
       onWireTool: setWireTool,
       onChipDblClick: openPeek,
       onBusToolDblClick: openPinEdit,
@@ -1068,6 +1088,45 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     </AnimatePresence>
   );
 
+  /* The titlebar's tool buttons — rendered inline on desktop/tablet and
+     inside the dropdown menu on mobile. */
+  const titleTools = (
+    <>
+      {!activeVhdl && (
+        <>
+          <div id="zoomgrp">
+            <button onClick={() => api().zoomOut()} title="Zoom out" aria-label="Zoom out">−</button>
+            <div id="zoomlabel" className="mono">{zoom}%</div>
+            <button onClick={() => api().zoomIn()} title="Zoom in" aria-label="Zoom in">+</button>
+          </div>
+          <button className={'tbtn' + (wireTool ? ' on' : '')} aria-pressed={wireTool}
+            title="Wire tool (W) — click any grid dot to start a wire; click an existing wire to split it"
+            onClick={() => api().setWireTool(!wireTool)}>Wire</button>
+          <button className="tbtn" onClick={() => api().resetView()}>Reset view</button>
+          <button className="tbtn" onClick={() => api().powerCycle()} title="Zero every signal and latch, like flipping the power">Power cycle</button>
+          <button className="tbtn danger" onClick={clearBoard}>Clear</button>
+        </>
+      )}
+      <button className={'tbtn' + (timingOpen ? ' on' : '')} aria-pressed={timingOpen}
+        title="Timing diagram — record and plot signals over time"
+        onClick={() => setTimingOpen(o => !o)}>Timing</button>
+      <button className={'tbtn' + (activeVhdl ? ' on' : '')}
+        title="Write a VHDL entity + architecture and use it as a chip — opens a fullscreen code editor tab"
+        onClick={() => openVhdlTab()}>VHDL</button>
+      <button className="tbtn" onClick={() => setCommunityOpen(true)}
+        title="Browse chips shared by other builders — or share your own">Community</button>
+      {!activeVhdl && (editingChip
+        ? <button className="tbtn primary" onClick={updateChip}
+            title={`Apply this circuit as the new internals of “${editingChip.name}”`}>Update chip</button>
+        : <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>)}
+      {user
+        ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a>
+        : authEnabled
+          ? <a className="tbtn ghostbtn" href="/auth/login">Sign in</a>
+          : null}
+    </>
+  );
+
   /* ── render ── */
   return (
     <div id="app" className={drag ? 'dragging' : ''}>
@@ -1075,47 +1134,62 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
      crossOrigin="anonymous"></script>
       <div id="titlebar">
         <div id="appname"><LogoMark size={22} />Latchwork<em>digital logic workbench</em></div>
-        <div id="titletools">
-
-        <div id="livedot"><i />Live</div>
-        {!activeVhdl && (
-          <>
-            <div id="zoomgrp">
-              <button onClick={() => api().zoomOut()} title="Zoom out" aria-label="Zoom out">−</button>
-              <div id="zoomlabel" className="mono">{zoom}%</div>
-              <button onClick={() => api().zoomIn()} title="Zoom in" aria-label="Zoom in">+</button>
-            </div>
-            <button className={'tbtn' + (wireTool ? ' on' : '')} aria-pressed={wireTool}
-              title="Wire tool (W) — click any grid dot to start a wire; click an existing wire to split it"
-              onClick={() => api().setWireTool(!wireTool)}>Wire</button>
-            <button className="tbtn" onClick={() => api().resetView()}>Reset view</button>
-            <button className="tbtn" onClick={() => api().powerCycle()} title="Zero every signal and latch, like flipping the power">Power cycle</button>
-            <button className="tbtn danger" onClick={clearBoard}>Clear</button>
-          </>
+        {isMobile ? (
+          <div id="titletools" className="mobilebar">
+            <div id="livedot"><i />Live</div>
+            <button id="menubtn" className={menuOpen ? 'on' : ''}
+              aria-expanded={menuOpen} aria-haspopup="menu" aria-label="Menu"
+              onClick={() => setMenuOpen(o => !o)}>
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M2.5 4.5 H13.5 M2.5 8 H13.5 M2.5 11.5 H13.5"
+                  stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" fill="none" />
+              </svg>
+            </button>
+          </div>
+        ) : (
+          <div id="titletools">
+            <div id="livedot"><i />Live</div>
+            {titleTools}
+          </div>
         )}
-        <button className={'tbtn' + (timingOpen ? ' on' : '')} aria-pressed={timingOpen}
-          title="Timing diagram — record and plot signals over time"
-          onClick={() => setTimingOpen(o => !o)}>Timing</button>
-        <button className={'tbtn' + (activeVhdl ? ' on' : '')}
-          title="Write a VHDL entity + architecture and use it as a chip — opens a fullscreen code editor tab"
-          onClick={() => openVhdlTab()}>VHDL</button>
-        <button className="tbtn" onClick={() => setCommunityOpen(true)}
-          title="Browse chips shared by other builders — or share your own">Community</button>
-        {!activeVhdl && (editingChip
-          ? <button className="tbtn primary" onClick={updateChip}
-              title={`Apply this circuit as the new internals of “${editingChip.name}”`}>Update chip</button>
-          : <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>)}
-        {user
-          ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a>
-          : authEnabled
-            ? <a className="tbtn ghostbtn" href="/auth/login">Sign in</a>
-            : null}
-        </div>
       </div>
+
+      {isMobile && (
+        <AnimatePresence>
+          {menuOpen && (
+            <>
+              <motion.div key="menuscrim" className="menuscrim"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                onPointerDown={() => setMenuOpen(false)} />
+              <motion.div key="menudrop" id="menudrop" role="menu" aria-label="Workbench menu"
+                initial={{ opacity: 0, y: -8, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -8, scale: 0.97 }}
+                transition={{ duration: 0.16, ease: 'easeOut' }}
+                onClickCapture={e => {
+                  // picking any action closes the menu — zoom taps keep it open
+                  const el = (e.target as HTMLElement).closest('button,a');
+                  if (el && !el.closest('#zoomgrp')) setMenuOpen(false);
+                }}>
+                {titleTools}
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+      )}
 
       <div id="main" style={activeVhdl ? { display: 'none' } : undefined} aria-hidden={activeVhdl || undefined}>
         <nav id="palette" aria-label="Component palette" style={{ width: palWidth }}
-          className={drag ? 'dragging-chip' : ''}>
+          className={(drag ? 'dragging-chip' : '') + (drawerOpen ? ' open' : '')}>
+          {/* mobile-only drawer handle (hidden by CSS on wider screens) */}
+          <button id="drawerhandle" aria-expanded={drawerOpen}
+            title={drawerOpen ? 'Close the component drawer' : 'Open the component drawer'}
+            onClick={() => setDrawerOpen(o => !o)}>
+            <i aria-hidden="true" />
+            <span>Components</span>
+            <span className="chev" aria-hidden="true">▾</span>
+          </button>
           <div id="palsearch">
             <SearchIcon />
             <input
@@ -1322,17 +1396,49 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
               </motion.div>
             )}
           </AnimatePresence>
+
+          {isMobile && (
+            <div id="mobilefabs">
+              {armed && (
+                <button className="fab wide" title="Stop placing parts"
+                  onClick={() => { api().beginPlace(armed.type, armed.chipId); api().clearSelection(); }}>
+                  ✕ Done
+                </button>
+              )}
+              {armed && (
+                <button className="fab" title="Rotate the part being placed" aria-label="Rotate"
+                  onClick={() => api().rotateSelection()}>⟳</button>
+              )}
+              <button className={'fab' + (wireTool ? ' on' : '')} aria-pressed={wireTool}
+                title="Wire tool — tap any grid dot to start a wire"
+                onClick={() => api().setWireTool(!wireTool)}>Wire</button>
+              <button className="fab zoom" onClick={() => api().zoomIn()} aria-label="Zoom in">+</button>
+              <button className="fab zoom" onClick={() => api().zoomOut()} aria-label="Zoom out">−</button>
+            </div>
+          )}
         </div>
 
         <AnimatePresence>
-          {sel && (
+          {isMobile && drawerOpen && (
+            <motion.div key="drawerscrim" className="drawerscrim"
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              onPointerDown={() => setDrawerOpen(false)} />
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {/* while stamping parts on mobile, the bottom sheet would cover the
+              canvas after every stamp (placing selects the new part) — hold it
+              back until placement ends */}
+          {sel && !(isMobile && armed) && (
             <motion.aside
               id="inspector"
               key="inspector"
               aria-label="Selection options"
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 272, opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
+              initial={isMobile ? { y: '105%' } : { width: 0, opacity: 0 }}
+              animate={isMobile ? { y: 0 } : { width: 272, opacity: 1 }}
+              exit={isMobile ? { y: '105%' } : { width: 0, opacity: 0 }}
               transition={{ type: 'spring', duration: 0.38, bounce: 0.14 }}
             >
               <div className="side-inner">

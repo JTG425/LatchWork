@@ -11,6 +11,11 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
+  // lock page zoom so iOS doesn't auto-zoom on input focus — the canvas
+  // has its own pinch-zoom
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: 'cover',
   themeColor: '#131316',
 };
 

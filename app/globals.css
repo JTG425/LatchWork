@@ -49,9 +49,9 @@
 .tunnelbody.hi{stroke:var(--hi)}.tunnelname{fill:var(--text);font-size:11px;font-family:ui-monospace,"SF Mono",Menlo,monospace;text-anchor:middle;pointer-events:none}.tunnelname.unset{fill:var(--muted);font-style:italic}
 .combval{fill:var(--hi);font-size:13px;font-weight:600;font-family:ui-monospace,"SF Mono",Menlo,monospace;text-anchor:middle;pointer-events:none}
 .savechipdialog{width:min(94vw,560px)}.savechipdialog .dialog-actions .spacer{flex:1}.ple{margin-top:14px}.ple-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:8px}.ple-hint{font-size:11px;color:var(--muted);flex:1}.ple-size{display:flex;gap:4px}.ple-size button{appearance:none;border:1px solid var(--panel-border);background:#2a2a31;color:var(--text);border-radius:6px;padding:3px 8px;font-size:11px;font-family:ui-monospace,Menlo,monospace;cursor:pointer}.ple-size button:hover{background:#33333b}.ple-svg{display:block;width:100%;height:260px;background:var(--canvas);border:1px solid var(--panel-border);border-radius:10px;touch-action:none}.ple-stub{stroke:var(--lo);stroke-width:2;fill:none;pointer-events:none}.ple-pindot{fill:#5a5a66;pointer-events:none}.ple-pin{fill:transparent;stroke:var(--accent);stroke-width:1.5;cursor:grab}.ple-pin:hover{fill:rgba(10,132,255,.18)}.ple-pin.drag{fill:rgba(10,132,255,.28);cursor:grabbing}.ple-pinname{fill:var(--muted);font-size:9px;letter-spacing:.4px;font-family:ui-monospace,"SF Mono",Menlo,monospace;cursor:grab}.ple-pinname:hover{fill:var(--text)}.ple-pinname.drag{fill:var(--accent);cursor:grabbing}
-@media(max-width:860px){#palette{width:100%!important}#palresize{display:none}}
+@media(min-width:650px) and (max-width:860px){#palette{width:100%!important}#palresize{display:none}}
 @media(max-width:900px){.community{width:94vw;height:88vh}.community-detail{grid-template-columns:1fr}.community-reviews{border-left:none;padding-left:0;border-top:1px solid var(--panel-border);padding-top:14px}.community-upload{grid-template-columns:1fr}.community-upload-preview{border-left:none;padding-left:0}}
-@media(prefers-reduced-motion:reduce){#livedot i{animation:none}}@media(max-width:860px){#titlebar{flex-wrap:wrap;height:auto;padding:8px 14px;row-gap:6px}#main{flex-direction:column}#palette{width:100%;height:auto;flex-direction:column;border-right:none;border-bottom:1px solid var(--panel-border)}#palsearch{margin:8px 8px 6px}#palscroll{flex:none;flex-direction:row;align-items:center;overflow-x:auto;overflow-y:hidden;height:96px;padding:0 8px 8px}#palscroll>div{display:flex;gap:4px}.pal-head,.pal-head-row,.pal-subhead-row,.pal-newfolder-row,.pal-folderempty{display:none}.pal-folder{display:flex;border-left:none;padding-left:0;margin-left:0;outline:none!important}.pal-folder .pal-item{margin-left:0}.pal-item{flex-direction:column;gap:4px;min-width:76px;text-align:center}.pal-item .sub{display:none}.pal-empty{min-width:200px}#statusbar span:nth-child(n+3){display:none}}
+@media(prefers-reduced-motion:reduce){#livedot i{animation:none}}@media(min-width:650px) and (max-width:860px){#titlebar{flex-wrap:wrap;height:auto;padding:8px 14px;row-gap:6px}#main{flex-direction:column}#palette{width:100%;height:auto;flex-direction:column;border-right:none;border-bottom:1px solid var(--panel-border)}#palsearch{margin:8px 8px 6px}#palscroll{flex:none;flex-direction:row;align-items:center;overflow-x:auto;overflow-y:hidden;height:96px;padding:0 8px 8px}#palscroll>div{display:flex;gap:4px}.pal-head,.pal-head-row,.pal-subhead-row,.pal-newfolder-row,.pal-folderempty{display:none}.pal-folder{display:flex;border-left:none;padding-left:0;margin-left:0;outline:none!important}.pal-folder .pal-item{margin-left:0}.pal-item{flex-direction:column;gap:4px;min-width:76px;text-align:center}.pal-item .sub{display:none}.pal-empty{min-width:200px}#statusbar span:nth-child(n+3){display:none}}
 #inspector{flex-shrink:0;background:var(--panel);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-left:1px solid var(--panel-border);overflow:hidden}
 .side-inner{width:272px;height:100%;overflow-y:auto;padding:14px 14px 18px;display:flex;flex-direction:column;gap:12px}
 .side-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
@@ -151,7 +151,7 @@
 .ple-drawline{fill:rgba(10,132,255,.08);stroke:var(--accent);stroke-width:1.5;stroke-dasharray:5 4;pointer-events:none}
 .ple-drawpt{fill:var(--accent);stroke:var(--canvas);stroke-width:1;pointer-events:none}
 .ple-drawpt.first{fill:#fff;stroke:var(--accent);stroke-width:2}
-@media(max-width:860px){#main{position:relative}#inspector{position:absolute;right:0;top:0;bottom:0;z-index:6;box-shadow:-12px 0 30px rgba(0,0,0,.35)}.pal-groupbody{flex-direction:row;height:auto!important}}
+@media(min-width:650px) and (max-width:860px){#main{position:relative}#inspector{position:absolute;right:0;top:0;bottom:0;z-index:6;box-shadow:-12px 0 30px rgba(0,0,0,.35)}.pal-groupbody{flex-direction:row;height:auto!important}}
 
 /* ── timing diagram panel ── */
 #timingpanel{flex-shrink:0;background:var(--panel);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-top:1px solid var(--panel-border);overflow:hidden;display:flex;flex-direction:column}
@@ -269,3 +269,69 @@ table.tablegrid{border-collapse:collapse;width:100%}
 .tablectl button.step{appearance:none;border:1px solid var(--panel-border);background:#2a2a31;color:var(--text);width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:14px;line-height:1;transition:background .12s}
 .tablectl button.step:hover{background:#33333b}
 .tablectl button.step:disabled{opacity:.35;cursor:default}
+
+/* ── mobile (under 650px): thin titlebar with a dropdown menu, the
+      component palette as a bottom drawer, inspector as a bottom sheet.
+      Desktop/tablet (≥650px) is untouched by everything below. ── */
+#drawerhandle{display:none}
+@media(max-width:649.98px){
+  #app{height:100dvh}
+  /* thin menu bar */
+  #titlebar{min-height:38px;padding:4px 10px;gap:8px}
+  #appname{font-size:12.5px;gap:6px}
+  #appname em{display:none}
+  #titletools.mobilebar{flex:1;display:flex;flex-wrap:nowrap;align-items:center;justify-content:flex-end;gap:12px}
+  #menubtn{appearance:none;display:flex;align-items:center;justify-content:center;width:34px;height:30px;border:1px solid var(--panel-border);background:#2a2a31;color:var(--text);border-radius:7px;cursor:pointer}
+  #menubtn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .menuscrim{position:fixed;inset:0;z-index:24;background:rgba(0,0,0,.35)}
+  #menudrop{position:fixed;top:44px;right:8px;z-index:25;width:min(78vw,250px);max-height:calc(100dvh - 58px);overflow-y:auto;display:flex;flex-direction:column;gap:6px;background:#1f1f24;border:1px solid var(--panel-border);border-radius:12px;padding:10px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+  #menudrop .tbtn{width:100%;text-align:left;padding:11px 12px;font-size:13px}
+  #menudrop #zoomgrp{height:40px;flex-shrink:0}
+  #menudrop #zoomgrp button{width:44px;height:100%;font-size:17px}
+  #menudrop #zoomlabel{flex:1;font-size:12.5px}
+
+  /* the workspace hosts the drawer and the bottom-sheet inspector */
+  #main{position:relative;overflow:hidden}
+  #palresize{display:none}
+
+  /* component palette → bottom drawer */
+  #palette{position:absolute;left:0;right:0;bottom:0;width:100%!important;height:min(62dvh,440px);z-index:7;border-right:none;border-top:1px solid var(--panel-border);border-radius:16px 16px 0 0;transform:translateY(calc(100% - 44px));transition:transform .3s cubic-bezier(.32,.72,.35,1);box-shadow:0 -16px 44px rgba(0,0,0,.45)}
+  #palette.open{transform:translateY(0)}
+  #drawerhandle{position:relative;display:flex;align-items:center;justify-content:center;gap:8px;appearance:none;border:none;background:none;color:var(--text);height:44px;flex-shrink:0;padding-top:8px;font-size:12.5px;font-weight:600;cursor:pointer;touch-action:manipulation}
+  #drawerhandle i{position:absolute;top:6px;left:50%;transform:translateX(-50%);width:40px;height:4px;border-radius:2px;background:#4a4a55}
+  #drawerhandle .chev{font-size:9px;color:var(--muted);transition:transform .2s;transform:rotate(180deg)}
+  #palette.open #drawerhandle .chev{transform:rotate(0deg)}
+  .drawerscrim{position:absolute;inset:0;z-index:6;background:rgba(0,0,0,.4)}
+  #palsearch .pskbd{display:none}
+  .pal-item{padding:9px 8px}
+  /* no hover on touch — keep row/folder/tab actions visible */
+  .chip-actions{opacity:1}
+  .chip-actions button{pointer-events:auto}
+  .folder-actions{opacity:1}
+  .folder-actions button{pointer-events:auto}
+  .edtab-close{opacity:1}
+
+  /* inspector → bottom sheet (its motion slides on y, not width) */
+  #inspector{position:absolute;left:0;right:0;bottom:0;top:auto;width:100%!important;z-index:8;border-left:none;border-top:1px solid var(--panel-border);border-radius:16px 16px 0 0;box-shadow:0 -16px 44px rgba(0,0,0,.45)}
+  .side-inner{width:100%;height:auto;max-height:56dvh}
+
+  /* floating canvas tools */
+  #mobilefabs{position:absolute;right:10px;bottom:56px;z-index:5;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+  #mobilefabs .fab{appearance:none;display:flex;align-items:center;justify-content:center;min-width:44px;height:44px;padding:0 13px;border:1px solid var(--panel-border);border-radius:12px;background:var(--panel);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);color:var(--text);font-size:12.5px;font-weight:600;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+  #mobilefabs .fab.on,#mobilefabs .fab.wide{background:var(--accent);border-color:var(--accent);color:#fff}
+  #mobilefabs .fab.zoom{font-size:19px;font-weight:500}
+  .toast{bottom:56px}
+
+  /* bottom bars: bigger tab targets, minimal status line */
+  #tabbar{height:38px}
+  #statusbar{height:calc(24px + env(safe-area-inset-bottom));padding:0 10px env(safe-area-inset-bottom);gap:10px;font-size:10.5px}
+  #statusbar span:nth-child(n+2){display:none}
+
+  /* dialogs & panels */
+  .dialog{padding:16px;max-height:90dvh;overflow-y:auto}
+  .community{width:100vw;height:100dvh;border-radius:0;border:none}
+  .community-controls{flex-wrap:wrap;gap:8px}
+  .ve-namefield input{width:130px}
+  .tp-head{gap:6px}
+}
+@media(prefers-reduced-motion:reduce){#palette{transition:none}}
