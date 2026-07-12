@@ -189,6 +189,15 @@
     let lastPt = { x: 0, y: 0, over: false };
     let hoverWire: string | null = null;   // wire under cursor while the wire tool is armed
 
+    /* touch gestures (mouse/pen input never enters these paths):
+       a second finger switches to pinch pan/zoom, and once a pinch has
+       happened the rest of that touch sequence is swallowed so lifting
+       fingers can't stamp parts or finish wires by accident */
+    const touchPts = new Map<number, Vec>();
+    let pinch: { d: number; cx: number; cy: number } | null = null;
+    let pinchPause = false;          // true from pinch start until every finger lifts
+    let touchStamp: number | null = null;  // touch pointer that stamps a part on lift
+
     const lib = () => cb.getLib();
 
     /* ── helpers ── */
@@ -930,10 +939,42 @@
 
     function onDown(e: PointerEvent) {
       if (e.button === 2) return;
+      if (e.pointerType === 'touch') {
+        touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (touchPts.size === 2) {
+          // second finger: switch to pinch pan/zoom — abandon whatever
+          // the first finger started so neither finger keeps a gesture
+          if (drag) {
+            const c = find(drag.primary);
+            if (c && c.type === 'BTN') c.pressed = false;
+            drag = null;
+          }
+          marquee = null;
+          resize = null;
+          touchStamp = null;
+          if (pan) { pan = null; svg.classList.remove('panning'); }
+          const [a, b] = [...touchPts.values()];
+          pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 };
+          pinchPause = true;
+          render();
+          return;
+        }
+        if (pinchPause || touchPts.size > 2) return;
+      }
       const pt = toWorld(e.clientX, e.clientY);
       if (e.button === 1) { e.preventDefault(); startPan(e); return; }
 
-      if (placing) { placeAt(pt.x, pt.y); return; }   // stamp mode: every click places one
+      if (placing) {
+        if (e.pointerType === 'touch') {
+          // touch: preview under the finger, stamp where it lifts — a
+          // second finger can still pinch-zoom mid-placement without stamping
+          placing.mx = pt.x; placing.my = pt.y; placing.over = true;
+          touchStamp = e.pointerId;
+          render();
+          return;
+        }
+        placeAt(pt.x, pt.y); return;   // stamp mode: every click places one
+      }
 
       const target = e.target as Element;
       const resizeEl = target.closest('[data-resize]');
@@ -1020,6 +1061,13 @@
         return;
       }
       if (spaceDown) { startPan(e); return; }
+      if (e.pointerType === 'touch') {
+        // touch: dragging empty canvas pans (rubber-band select is mouse-only)
+        setSelection([]);
+        startPan(e);
+        render();
+        return;
+      }
       // empty space: rubber-band select
       setSelection([]);
       marquee = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
@@ -1047,6 +1095,25 @@
     }
 
     function onMove(e: PointerEvent) {
+      if (e.pointerType === 'touch' && touchPts.has(e.pointerId)) {
+        touchPts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pinch && touchPts.size >= 2) {
+          const [a, b] = [...touchPts.values()];
+          const d = Math.hypot(a.x - b.x, a.y - b.y);
+          const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+          const r = svg.getBoundingClientRect();
+          const px = cx - r.left, py = cy - r.top;
+          const k = Math.min(2.5, Math.max(0.35, view.k * (pinch.d > 0 ? d / pinch.d : 1)));
+          // zoom about the finger centroid, panning with it as it moves
+          view.x = px - (px - view.x) * (k / view.k) + (cx - pinch.cx);
+          view.y = py - (py - view.y) * (k / view.k) + (cy - pinch.cy);
+          view.k = k;
+          pinch = { d, cx, cy };
+          render();
+          return;
+        }
+        if (pinchPause) return;
+      }
       const pt = toWorld(e.clientX, e.clientY);
       {
         const r = svg.getBoundingClientRect();
@@ -1139,6 +1206,34 @@
     }
 
     function onUp(e: PointerEvent) {
+      if (e.pointerType === 'touch') {
+        touchPts.delete(e.pointerId);
+        if (pinch && touchPts.size < 2) pinch = null;
+        if (pinchPause) {
+          if (touchPts.size === 0) pinchPause = false;
+          touchStamp = null;
+          return;   // fingers coming off a pinch never stamp/click
+        }
+      }
+      if (e.type === 'pointercancel') {
+        // the system claimed the gesture — drop every transient state
+        touchStamp = null;
+        if (drag) {
+          const c = find(drag.primary);
+          if (c && c.type === 'BTN') c.pressed = false;
+          drag = null;
+          refresh(false);
+        }
+        if (pan) { pan = null; svg.classList.remove('panning'); }
+        marquee = null;
+        resize = null;
+        render();
+        return;
+      }
+      if (e.pointerType === 'touch' && touchStamp === e.pointerId) {
+        touchStamp = null;
+        if (placing) { placeAt(placing.mx, placing.my); return; }
+      }
       if (resize) {
         resize = null;
         refresh();
@@ -1265,6 +1360,7 @@
     svg.addEventListener('dblclick', onDblClick);
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
     svg.addEventListener('contextmenu', onContext);
     svg.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('keydown', onKey);
@@ -1473,6 +1569,7 @@
         svg.removeEventListener('dblclick', onDblClick);
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
         svg.removeEventListener('contextmenu', onContext);
         svg.removeEventListener('wheel', onWheel);
         window.removeEventListener('keydown', onKey);
