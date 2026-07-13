@@ -1,7 +1,7 @@
 'use client';
 
 /* Timing diagram panel — CircuitVerse-style waveform viewer docked
-   above the tab bar. Two simulation modes:
+   above the tab bar. Three simulation modes:
 
    · Live — the editor records value-change points for every probed
      component (see editor.ts); this panel polls those traces and draws
@@ -9,6 +9,11 @@
    · Fixed length — re-simulates the board from power-on over a set
      virtual time span (seconds / ms / ns, matching the clock speeds)
      and plots the result exactly, so kHz/MHz clocks resolve cleanly.
+   · Test vectors — pick which inputs to drive and give each one a
+     per-step pattern (an explicit value list, random n-bit values, or
+     a joint truth-table count across every input set to it); the run
+     applies step s's values, lets the board settle (a full clock cycle
+     per step when clocks exist), and plots driven inputs + probes.
 
    Extras: drag the top grip to resize (up to half the screen), a
    vertical cursor line tracks the pointer, clicking drops a labelable
@@ -17,7 +22,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { formatBusValue } from '@/lib/engine';
-import type { EditorApi, TimingTrace } from '@/components/editor';
+import type { EditorApi, StimInput, TimingTrace } from '@/components/editor';
 
 const ROW_H = 34;
 const GUTTER = 116;
@@ -35,8 +40,93 @@ type LenUnit = 's' | 'ms' | 'ns';
 const UNIT_MS: Record<LenUnit, number> = { s: 1000, ms: 1, ns: 1e-6 };
 const unitForHz = (hz: number): LenUnit => (hz >= 1e6 ? 'ns' : hz >= 1e3 ? 'ms' : 's');
 
-interface FixedRun { traces: TimingTrace[]; duration: number; truncated: boolean; unit: LenUnit }
+/* one run result — fixed runs carry a time unit, vector runs carry
+   'step' plus how long each step lasts in virtual ms */
+interface FixedRun {
+  traces: TimingTrace[];
+  duration: number;
+  truncated: boolean;
+  unit: LenUnit | 'step';
+  stepMs?: number;
+  steps?: number;
+}
 interface Marker { id: string; t: number; label: string }
+
+/* ── test-vector patterns ── */
+type Mode = 'live' | 'fixed' | 'stim';
+type StimMode = 'list' | 'random' | 'count';
+interface StimRowCfg { on: boolean; mode: StimMode; text: string }
+const DEF_ROW: StimRowCfg = { on: false, mode: 'list', text: '' };
+const MAX_STIM_STEPS = 4096;
+
+/* "0, 3, 0xF, 0b1010" → bigints (decimal, 0x hex, 0b binary) */
+function parseValueList(text: string): bigint[] {
+  const out: bigint[] = [];
+  for (const tok of text.split(/[\s,;]+/)) {
+    if (!tok) continue;
+    try { out.push(BigInt(tok)); } catch { /* skip non-numbers */ }
+  }
+  return out;
+}
+
+const maskBits = (v: bigint, bits: number) => v & ((1n << BigInt(bits)) - 1n);
+
+function randomBits(bits: number): bigint {
+  let v = 0n;
+  for (let left = bits; left > 0; left -= 24) {
+    const take = Math.min(24, left);
+    v = (v << BigInt(take)) | BigInt(Math.floor(Math.random() * 2 ** take));
+  }
+  return v;
+}
+
+type StimRow = { inp: StimInput; cfg: StimRowCfg };
+
+/* Steps that cover every pattern once: the longest value list, the
+   full joint truth table of the 'count' inputs, 8 for random-only. */
+function autoStepsFor(active: StimRow[]): number {
+  let n = 1, comboBits = 0, anyRandom = false;
+  for (const { inp, cfg } of active) {
+    if (cfg.mode === 'list') n = Math.max(n, parseValueList(cfg.text).length || 1);
+    else if (cfg.mode === 'random') anyRandom = true;
+    else comboBits += inp.bits;
+  }
+  if (comboBits) n = Math.max(n, comboBits >= 31 ? MAX_STIM_STEPS : Math.min(MAX_STIM_STEPS, 2 ** comboBits));
+  if (anyRandom) n = Math.max(n, 8);
+  return Math.min(MAX_STIM_STEPS, n);
+}
+
+/* Per-step values for every driven input. Value lists repeat when the
+   run is longer; 'count' inputs form one joint binary counter — the
+   first one selected holds the most-significant bits, so together they
+   enumerate their full truth table in classic row order. */
+function resolveDrives(active: StimRow[], n: number): { compId: string; values: bigint[] }[] {
+  const counters = active.filter(a => a.cfg.mode === 'count');
+  const shifts = new Map<string, bigint>();
+  let below = 0;
+  for (let i = counters.length - 1; i >= 0; i--) {
+    shifts.set(counters[i].inp.id, BigInt(below));
+    below += counters[i].inp.bits;
+  }
+  return active.map(({ inp, cfg }) => {
+    const values: bigint[] = [];
+    if (cfg.mode === 'list') {
+      const list = parseValueList(cfg.text);
+      if (!list.length) list.push(0n);
+      for (let s = 0; s < n; s++) values.push(maskBits(list[s % list.length], inp.bits));
+    } else if (cfg.mode === 'random') {
+      for (let s = 0; s < n; s++) values.push(randomBits(inp.bits));
+    } else {
+      const shift = shifts.get(inp.id) ?? 0n;
+      for (let s = 0; s < n; s++) values.push(maskBits(BigInt(s) >> shift, inp.bits));
+    }
+    return { compId: inp.id, values };
+  });
+}
+
+/* step-axis text: whole steps plain, fractional (cursor/markers) to .1 */
+const fmtStep = (s: number) =>
+  '#' + (Math.abs(s - Math.round(s)) < 1e-6 ? Math.round(s) : +s.toFixed(1));
 
 /* pick a round grid step ≈ window/6 (1-2-5 sequence) */
 function gridStep(windowMs: number): number {
@@ -72,7 +162,7 @@ export default function TimingPanel({ api, onClose }: {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [, setTick] = useState(0);
-  const [mode, setMode] = useState<'live' | 'fixed'>('live');
+  const [mode, setMode] = useState<Mode>('live');
   const [paused, setPaused] = useState(false);
   const [windowMs, setWindowMs] = useState(DEF_WINDOW);
   const [bodyH, setBodyH] = useState(BODY_DEF);
@@ -83,6 +173,9 @@ export default function TimingPanel({ api, onClose }: {
   const [editing, setEditing] = useState<{ id: string; left: number } | null>(null);
   const [markerDraft, setMarkerDraft] = useState('');
   const [cursorX, setCursorX] = useState<number | null>(null);
+  const [stimCfg, setStimCfg] = useState<Record<string, StimRowCfg>>({});
+  const [stepsDraft, setStepsDraft] = useState('');
+  const stepsTouched = useRef(false);   // user typed a step count — stop auto-filling
   const frozenAt = useRef(0);
 
   useEffect(() => {
@@ -90,6 +183,13 @@ export default function TimingPanel({ api, onClose }: {
     const t = window.setInterval(() => setTick(v => v + 1), 100);
     return () => window.clearInterval(t);
   }, [paused, mode]);
+
+  /* vectors mode: slow poll so the input list tracks board edits */
+  useEffect(() => {
+    if (mode !== 'stim') return;
+    const t = window.setInterval(() => setTick(v => v + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [mode]);
 
   useEffect(() => () => { api().setTimingPaused(false); }, [api]);
 
@@ -107,11 +207,12 @@ export default function TimingPanel({ api, onClose }: {
 
   /* first switch into fixed mode: seed length ≈ 10 periods of the
      fastest clock, in that clock's natural unit */
-  const switchMode = (m: 'live' | 'fixed') => {
+  const switchMode = (m: Mode) => {
     if (m === mode) return;
     setMode(m);
     setMarkers([]);
     setEditing(null);
+    setRun(null);   // runs don't carry across modes (a vector run isn't a fixed run)
     if (m === 'fixed' && !lenDraft) {
       const hz = api().maxClockHz();
       if (hz) {
@@ -138,6 +239,32 @@ export default function TimingPanel({ api, onClose }: {
     if (!isFinite(v) || v <= 0) return;
     const res = api().runFixedSim(v * UNIT_MS[lenUnit]);
     setRun({ ...res, unit: lenUnit });
+    setMarkers([]);
+    setEditing(null);
+  };
+
+  /* ── test-vector config ── */
+  const stimInputs = mode === 'stim' ? api().listStimInputs() : [];
+  const active: StimRow[] = stimInputs
+    .filter(i => stimCfg[i.id]?.on)
+    .map(i => ({ inp: i, cfg: stimCfg[i.id]! }));
+  const comboRows = active.filter(a => a.cfg.mode === 'count');
+  const comboBits = comboRows.reduce((s, a) => s + a.inp.bits, 0);
+  const autoN = autoStepsFor(active);
+
+  /* keep the step count covering the patterns until the user types one */
+  useEffect(() => {
+    if (mode === 'stim' && !stepsTouched.current) setStepsDraft(String(autoN));
+  }, [mode, autoN]);
+
+  const patchRow = (id: string, patch: Partial<StimRowCfg>) =>
+    setStimCfg(cfg => ({ ...cfg, [id]: { ...DEF_ROW, ...cfg[id], ...patch } }));
+
+  const runStim = () => {
+    if (!active.length) return;
+    const n = Math.max(1, Math.min(MAX_STIM_STEPS, parseInt(stepsDraft, 10) || autoN));
+    const res = api().runStimSim(resolveDrives(active, n), n);
+    setRun({ ...res, unit: 'step' });
     setMarkers([]);
     setEditing(null);
   };
@@ -173,7 +300,12 @@ export default function TimingPanel({ api, onClose }: {
   const x = (t: number) => GUTTER + ((t - t0) / span) * plotW;
   const tAt = (px: number) => t0 + ((px - GUTTER) / plotW) * span;
   const height = Math.max(1, traces.length) * ROW_H + 22;
-  const axisLabel = (t: number) => (live ? `−${fmtTime(now - t)}` : fmtLen(t, run?.unit ?? lenUnit));
+  const stepRun = run?.unit === 'step';
+  const stepMs = run?.stepMs || 1;
+  const axisLabel = (t: number) => live
+    ? `−${fmtTime(now - t)}`
+    : stepRun ? fmtStep(t / stepMs)
+      : fmtLen(t, (run?.unit as LenUnit) ?? lenUnit);
 
   const rows = traces.map((tr, i) => {
     const yTop = i * ROW_H + 8, yBot = (i + 1) * ROW_H - 8;
@@ -225,8 +357,10 @@ export default function TimingPanel({ api, onClose }: {
     );
   });
 
-  /* time grid */
-  const step = gridStep(span);
+  /* time grid — step runs snap the grid to whole steps */
+  const step = stepRun
+    ? Math.max(1, gridStep(run?.steps ?? span / stepMs)) * stepMs
+    : gridStep(span);
   const gridLines: React.ReactNode[] = [];
   for (let t = Math.ceil(t0 / step) * step; t <= t1 + step * 1e-6; t += step) {
     const gx = x(t);
@@ -367,9 +501,13 @@ export default function TimingPanel({ api, onClose }: {
     ? (traces.length
       ? `${traces.length} signal${traces.length > 1 ? 's' : ''} · last ${fmtTime(windowMs)}`
       : 'select a part and turn on “Plot in timing diagram”')
-    : (run
-      ? `0 – ${fmtLen(run.duration, run.unit)} · ${traces.length} signal${traces.length === 1 ? '' : 's'}${run.truncated ? ' · shortened to keep the run fast' : ''}`
-      : 'set a length and press Run — probed signals re-simulate from power-on');
+    : mode === 'stim'
+      ? (run
+        ? `${run.steps ?? 0} step${run.steps === 1 ? '' : 's'} · ${traces.length} signal${traces.length === 1 ? '' : 's'}${run.truncated ? ' · shortened to keep the run fast' : ''}`
+        : 'tick the inputs to drive, give each a per-step pattern, and press Run')
+      : (run
+        ? `0 – ${fmtLen(run.duration, run.unit as LenUnit)} · ${traces.length} signal${traces.length === 1 ? '' : 's'}${run.truncated ? ' · shortened to keep the run fast' : ''}`
+        : 'set a length and press Run — probed signals re-simulate from power-on');
 
   return (
     <motion.div
@@ -391,11 +529,14 @@ export default function TimingPanel({ api, onClose }: {
           <button role="tab" aria-selected={live} className={live ? 'on' : ''}
             title="Record signals as the canvas simulates in real time"
             onClick={() => switchMode('live')}>Live</button>
-          <button role="tab" aria-selected={!live} className={!live ? 'on' : ''}
+          <button role="tab" aria-selected={mode === 'fixed'} className={mode === 'fixed' ? 'on' : ''}
             title="Simulate a set time span virtually — exact even for kHz/MHz clocks"
             onClick={() => switchMode('fixed')}>Fixed length</button>
+          <button role="tab" aria-selected={mode === 'stim'} className={mode === 'stim' ? 'on' : ''}
+            title="Drive chosen inputs with per-step value patterns — exact lists, random values, or full truth-table combinations"
+            onClick={() => switchMode('stim')}>Test vectors</button>
         </div>
-        {live ? (
+        {live && (
           <>
             <button className="tbtn" onClick={togglePause} aria-pressed={paused}
               title={paused ? 'Resume recording' : 'Pause recording'}>{paused ? '▶ Resume' : '❚❚ Pause'}</button>
@@ -409,7 +550,8 @@ export default function TimingPanel({ api, onClose }: {
                 onClick={() => setWindowMs(w => Math.min(MAX_WINDOW, w * 2))}>−</button>
             </div>
           </>
-        ) : (
+        )}
+        {mode === 'fixed' && (
           <>
             <div className="tp-len" title="Simulation length — the unit follows the clock speed: Hz → s, kHz → ms, MHz → ns">
               <input
@@ -435,11 +577,95 @@ export default function TimingPanel({ api, onClose }: {
             )}
           </>
         )}
+        {mode === 'stim' && (
+          <>
+            <div className="tp-len" title="How many steps to run — each step applies every driven input's next value. Auto-fills to cover the patterns (full truth table, longest list).">
+              <input
+                className="mono"
+                inputMode="numeric"
+                value={stepsDraft}
+                aria-label="Vector steps"
+                onChange={e => {
+                  const v = e.target.value.replace(/[^0-9]/g, '');
+                  stepsTouched.current = v !== '';
+                  setStepsDraft(v || String(autoN));   // clearing resumes auto-fill
+                }}
+                onKeyDown={e => { if (e.key === 'Enter') runStim(); }}
+              />
+              <span className="tp-lenunit">steps</span>
+            </div>
+            <button className="tbtn primary" onClick={runStim} disabled={!active.length}
+              title="Apply the vectors step by step from power-on and plot every driven input and probed signal">Run</button>
+            {run && (
+              <button className="tbtn" onClick={() => { setRun(null); setMarkers([]); setEditing(null); }}
+                title="Discard this run">Clear</button>
+            )}
+          </>
+        )}
         <button className="tbtn" onClick={exportPng} disabled={!traces.length}
           title="Export the diagram as a PNG image">Export PNG</button>
         <button className="community-close" aria-label="Close timing diagram" onClick={onClose}>×</button>
       </div>
       <div className="tp-body" ref={wrapRef} style={{ height: bodyH }}>
+        {mode === 'stim' && (
+          <div className="tp-stim">
+            {stimInputs.length ? (
+              <>
+                <div className="tp-stimlist" role="group" aria-label="Inputs to drive">
+                  {stimInputs.map(inp => {
+                    const cfg = stimCfg[inp.id] ?? DEF_ROW;
+                    return (
+                      <div key={inp.id} className={'tp-stimrow' + (cfg.on ? ' on' : '')}>
+                        <label className="tp-stimpick" title="Drive this input during the run">
+                          <input type="checkbox" checked={cfg.on}
+                            onChange={e => patchRow(inp.id, { on: e.target.checked })} />
+                          <span className="tp-stimname ellip">{inp.name}</span>
+                          <span className="tp-stimbits mono">{inp.bits}b</span>
+                        </label>
+                        {cfg.on && (
+                          <>
+                            <select value={cfg.mode} aria-label={`${inp.name} pattern`}
+                              title="How this input changes each step: an exact value list, a fresh random value, or counting through every combination"
+                              onChange={e => patchRow(inp.id, { mode: e.target.value as StimMode })}>
+                              <option value="list">Values</option>
+                              <option value="random">Random</option>
+                              <option value="count">All combinations</option>
+                            </select>
+                            {cfg.mode === 'list' && (
+                              <input className="mono tp-stimvals" value={cfg.text}
+                                placeholder="e.g. 0, 3, 0xF, 0b1010 — repeats if the run is longer"
+                                aria-label={`${inp.name} value list`}
+                                onChange={e => patchRow(inp.id, { text: e.target.value })}
+                                onKeyDown={e => { if (e.key === 'Enter') runStim(); }} />
+                            )}
+                            {cfg.mode === 'random' && (
+                              <span className="tp-stimhint">fresh random {inp.bits}-bit value every step</span>
+                            )}
+                            {cfg.mode === 'count' && (
+                              <span className="tp-stimhint">binary count over {inp.bits} bit{inp.bits > 1 ? 's' : ''}</span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {comboRows.length > 0 && (
+                  <div className="tp-stimfoot">
+                    {comboRows.map(a => a.inp.name).join(' + ')} count together through
+                    all {comboBits >= 31 ? `2^${comboBits}` : (2 ** comboBits).toLocaleString()} combinations
+                    {comboRows.length > 1 ? ' — the first holds the high bits, truth-table order' : ''}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="tp-empty">
+                No drivable inputs on this board — add a <b>switch</b>, <b>button</b>,
+                <b> input pin</b>, or <b>value</b> and wire it into the circuit.
+              </div>
+            )}
+          </div>
+        )}
         {traces.length ? (
           <svg ref={svgRef} width="100%" height={height} role="img" aria-label="Signal waveforms"
             onPointerMove={onPlotMove} onPointerLeave={() => setCursorX(null)} onClick={onPlotClick}>
@@ -449,6 +675,15 @@ export default function TimingPanel({ api, onClose }: {
             {markerNodes}
             {cursorNode}
           </svg>
+        ) : mode === 'stim' ? (
+          stimInputs.length > 0 && (
+            <div className="tp-empty">
+              Tick the inputs to vary — e.g. an ALU&apos;s select bits with exact <b>values</b>,
+              its A and B as <b>all combinations</b> or <b>random</b> — then press <b>Run</b>.
+              Driven inputs plot automatically; enable <b>Plot in timing diagram</b> on the
+              outputs you want to watch.
+            </div>
+          )
         ) : (
           <div className="tp-empty">
             {live ? (
