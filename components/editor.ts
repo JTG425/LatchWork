@@ -54,6 +54,20 @@
     pts: { t: number; v: bigint }[];
   }
 
+  /* Test-vector (stimulus) runs for the timing diagram: a drivable
+     board input, one input's resolved per-step value sequence, and
+     the run result. Time is virtual ms; one step = one slowest-clock
+     period (1 ms on clockless boards). */
+  export interface StimInput { id: string; name: string; type: CompType; bits: number }
+  export interface StimDrive { compId: string; values: bigint[] }
+  export interface StimRun {
+    traces: TimingTrace[];
+    duration: number;   // virtual ms actually simulated
+    stepMs: number;     // virtual ms per step
+    steps: number;      // steps actually simulated
+    truncated: boolean; // true when capped below the requested steps
+  }
+
   export interface PlacingInfo { type: CompType; chipId?: string }
 
   export interface EditorCallbacks {
@@ -123,6 +137,13 @@
        power-on over a virtual time span (ms, fractional for ns runs)
        and return the probed signals' change points on a t=0 base */
     runFixedSim(durationMs: number): { traces: TimingTrace[]; duration: number; truncated: boolean };
+    /* timing diagram "test vectors" mode: the inputs the run can drive
+       (switches, buttons, input pins, values) … */
+    listStimInputs(): StimInput[];
+    /* … and the run itself: re-simulate from power-on, applying each
+       drive's step-s value at the start of step s. Driven inputs are
+       always traced (in the order given), then every probed comp. */
+    runStimSim(drives: StimDrive[], steps: number): StimRun;
     rerender(): void;
     destroy(): void;
   }
@@ -442,6 +463,94 @@
         }
       }
       return { traces: [...run.values()], duration: end, truncated };
+    }
+
+    /* ── test-vector (stimulus) simulation ──
+       Re-runs the board from power-on, driving chosen inputs with a
+       per-step value sequence. A step lasts one period of the slowest
+       clock (so every clock completes a full cycle — edge-triggered
+       logic latches once per step); clockless boards get a nominal
+       1 virtual ms per step. Runs on a cloned board + fresh state;
+       the live simulation is untouched. */
+    const STIM_TYPES: ReadonlySet<CompType> = new Set(['IN', 'BTN', 'IPIN', 'VAL']);
+    function stimName(c: Comp): string {
+      return (c.label || '').trim() || getGeom(c, lib()).name;
+    }
+    function listStimInputs(): StimInput[] {
+      return comps
+        .filter(c => STIM_TYPES.has(c.type))
+        .map(c => ({
+          id: c.id,
+          name: stimName(c),
+          type: c.type,
+          bits: c.type === 'IPIN' || c.type === 'VAL' ? clampBits(c.bits ?? 1) : 1,
+        }));
+    }
+    function driveStim(c: Comp, v: bigint) {
+      if (c.type === 'IN') c.on = (v & 1n) !== 0n;
+      else if (c.type === 'BTN') c.pressed = (v & 1n) !== 0n;
+      else if (c.type === 'IPIN' && clampBits(c.bits ?? 1) === 1) c.on = (v & 1n) !== 0n;
+      else if (c.type === 'IPIN' || c.type === 'VAL') c.val = storeVal(maskVal(v, clampBits(c.bits ?? 1)));
+    }
+    function runStimSim(drives: StimDrive[], steps: number): StimRun {
+      const board = cloneBoard({ comps, wires });   // keeps probe flags, drops live state
+      const st = newSimState();
+      const byId = new Map(board.comps.map(c => [c.id, c]));
+      const live = drives.filter(d => {
+        const c = byId.get(d.compId);
+        return c && STIM_TYPES.has(c.type) && d.values.length;
+      });
+
+      const halves: number[] = [];
+      collectClockHalves(board.comps, 0, halves);
+      const stepMs = halves.length ? 2 * Math.max(...halves) : 1;
+
+      // cap total evaluations the same way the fixed run does
+      const asked = Math.max(1, Math.round(steps));
+      const perStep = 1 + stepMs * halves.reduce((s, h) => s + 1 / h, 0);
+      const n = Math.max(1, Math.min(asked, Math.floor(FIXED_SIM_MAX_EVENTS / perStep)));
+      const truncated = n < asked;
+      const end = n * stepMs;
+
+      // evaluate at each step start plus every clock half-period boundary
+      const times = new Set<number>();
+      for (let s = 0; s < n; s++) times.add(s * stepMs);
+      for (const h of halves) {
+        for (let k = 1; k * h < end; k++) times.add(k * h);
+      }
+      const sorted = [...times].sort((a, b) => a - b);
+      // same guard as the fixed run: keep float error in k·h from
+      // landing a clock on the wrong side of its own edge
+      const eps = halves.length ? Math.min(...halves) * 1e-6 : 0;
+
+      // driven inputs plot first (in the order given), then probed comps
+      const targets: Comp[] = live.map(d => byId.get(d.compId)!);
+      const driven = new Set(targets.map(c => c.id));
+      for (const c of board.comps) if (c.probe && !driven.has(c.id)) targets.push(c);
+
+      const run = new Map<string, TimingTrace>();
+      let curStep = -1;
+      for (const t of sorted) {
+        const s = Math.min(n - 1, Math.floor(t / stepMs + 1e-9));
+        if (s > curStep) {
+          curStep = s;
+          for (const d of live) driveStim(byId.get(d.compId)!, d.values[Math.min(s, d.values.length - 1)]);
+        }
+        evaluateNet(board.comps, board.wires, st, lib(), undefined, 0, t + eps);
+        for (const c of targets) {
+          const sig = probeSignal(c, st);
+          if (!sig) continue;
+          let tr = run.get(c.id);
+          if (!tr) {
+            tr = { id: c.id, name: stimName(c), bits: sig.bits, pts: [] };
+            run.set(c.id, tr);
+          }
+          const last = tr.pts[tr.pts.length - 1];
+          if (!last || last.v !== sig.v) tr.pts.push({ t, v: sig.v });
+        }
+      }
+      const traces = targets.map(c => run.get(c.id)).filter((tr): tr is TimingTrace => !!tr);
+      return { traces, duration: end, stepMs, steps: n, truncated };
     }
 
     /* ── rendering ── */
@@ -1552,6 +1661,8 @@
         return halves.length ? 500 / Math.min(...halves) : null;
       },
       runFixedSim,
+      listStimInputs,
+      runStimSim,
       removeChipInstances(chipId) {
         const doomed = new Set(comps.filter(c => c.chipId === chipId).map(c => c.id));
         if (!doomed.size) { refresh(false); return; }

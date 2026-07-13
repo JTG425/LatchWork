@@ -1108,7 +1108,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         </>
       )}
       <button className={'tbtn' + (timingOpen ? ' on' : '')} aria-pressed={timingOpen}
-        title="Timing diagram — record and plot signals over time"
+        title="Timing diagram — record and plot signals over time, or drive inputs with test vectors"
         onClick={() => setTimingOpen(o => !o)}>Timing</button>
       <button className={'tbtn' + (activeVhdl ? ' on' : '')}
         title="Write a VHDL entity + architecture and use it as a chip — opens a fullscreen code editor tab"
