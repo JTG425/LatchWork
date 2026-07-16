@@ -1291,8 +1291,10 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       {user
         ? <a className="tbtn ghostbtn" href="/auth/logout" title={user.email ?? ''}>{user.name?.split(' ')[0] ?? 'Account'} · Sign out</a>
         : authEnabled
-          ? <a className="tbtn ghostbtn" href="/auth/login">Sign in</a>
-          : null}
+          ? <a className="tbtn ghostbtn" href="/auth/login">Sign in / Sign up</a>
+          : <button className="tbtn ghostbtn" type="button"
+              title="Account sign-in is not configured for this deployment"
+              onClick={() => notify('Sign-in is not configured for this deployment.')}>Sign in / Sign up</button>}
     </>
   );
 
