@@ -19,9 +19,11 @@ import PeekDialog, { ChipPackageEditor } from '@/components/PeekDialog';
 import CommunityDialog from '@/components/CommunityDialog';
 import ChipAnalysis, { ChipPreview } from '@/components/ChipAnalysis';
 import VhdlEditor from '@/components/VhdlEditor';
+import FpgaBoard from '@/components/FpgaBoard';
 import TimingPanel from '@/components/TimingPanel';
 import LogoMark from '@/components/Logo';
 import { VHDL_TEMPLATE, VhdlModule } from '@/lib/vhdl';
+import { FPGA_TEMPLATE } from '@/lib/basys3';
 
 const LS_BOARD = 'latchwork.board.v1';   // legacy single-board key, migrated into tabs
 const LS_CHIPS = 'latchwork.chips.v1';
@@ -65,9 +67,13 @@ export interface SimUser { id?: string | null; name?: string | null; email?: str
 /* One editor tab. `chipId` marks a tab that edits a chip's internal
    circuit; `kind: 'vhdl'` marks a fullscreen VHDL code editor tab
    (`vhdlChipId` binds it to the library chip it edits once saved —
-   until then it's an unsaved module draft). */
-interface TabInfo { id: string; name: string; chipId?: string; kind?: 'vhdl'; vhdlChipId?: string }
+   until then it's an unsaved module draft); `kind: 'fpga'` marks a 3D
+   Basys 3 FPGA development board programmed from VHDL (`vhdlSource`
+   holds the code for both fullscreen kinds). */
+interface TabInfo { id: string; name: string; chipId?: string; kind?: 'vhdl' | 'fpga'; vhdlChipId?: string }
 interface TabData extends TabInfo { board: Board; vhdlSource?: string }
+/* fullscreen tabs never own the canvas */
+const ownsCanvas = (t?: TabInfo | TabData) => !t?.kind;
 const tabMeta = ({ board: _b, vhdlSource: _s, ...meta }: TabData): TabInfo => meta;
 const newTabId = () => 'tab_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -337,10 +343,10 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
 
   /* ── tabs ── */
   const syncActiveBoard = useCallback(() => {
-    // VHDL tabs never own the canvas — copying it in would capture
-    // whichever sheet the (hidden) canvas still holds
+    // fullscreen tabs (VHDL / FPGA) never own the canvas — copying it in
+    // would capture whichever sheet the (hidden) canvas still holds
     const t = tabsRef.current.find(t => t.id === activeTabRef.current);
-    if (t && t.kind !== 'vhdl' && apiRef.current) t.board = apiRef.current.getBoard();
+    if (ownsCanvas(t) && apiRef.current) t!.board = apiRef.current.getBoard();
   }, []);
 
   const persistTabs = useCallback(() => {
@@ -361,9 +367,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     syncActiveBoard();
     activeTabRef.current = id;
     setActiveTab(id);
-    // a VHDL tab leaves the (hidden) canvas untouched — the next board
-    // tab reloads it
-    if (t.kind !== 'vhdl') apiRef.current!.setBoard(t.board);
+    // a fullscreen tab leaves the (hidden) canvas untouched — the next
+    // board tab reloads it
+    if (ownsCanvas(t)) apiRef.current!.setBoard(t.board);
     persistTabs();
   }, [syncActiveBoard, persistTabs]);
 
@@ -393,7 +399,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       const next = tabsRef.current[Math.max(0, idx - 1)];
       activeTabRef.current = next.id;
       setActiveTab(next.id);
-      if (next.kind !== 'vhdl') apiRef.current!.setBoard(next.board);
+      if (ownsCanvas(next)) apiRef.current!.setBoard(next.board);
     }
     publishTabs();
     persistTabs();
@@ -443,6 +449,29 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     persistTabs();
   }, [switchTab, syncActiveBoard, publishTabs, persistTabs]);
 
+  /* Open the 3D FPGA development-board sheet (one per workspace): a
+     Basys 3 trainer board programmed from VHDL. */
+  const openFpgaTab = useCallback(() => {
+    setEditAsk(null);
+    setInspect(null);
+    setPeek(null);
+    const existing = tabsRef.current.find(t => t.kind === 'fpga');
+    if (existing) { switchTab(existing.id); return; }
+    syncActiveBoard();
+    const t: TabData = {
+      id: newTabId(),
+      name: 'Basys 3',
+      kind: 'fpga',
+      vhdlSource: FPGA_TEMPLATE,
+      board: { comps: [], wires: [] },
+    };
+    tabsRef.current.push(t);
+    activeTabRef.current = t.id;
+    setActiveTab(t.id);
+    publishTabs();
+    persistTabs();
+  }, [switchTab, syncActiveBoard, publishTabs, persistTabs]);
+
   /* VHDL chips have no circuit — "edit internals" means editing the code. */
   const askEditChip = useCallback((chipId: string) => {
     const def = chipsRef.current[chipId];
@@ -459,10 +488,10 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     setPeek({ compId, chipId });
   }, [openVhdlTab]);
 
-  /* Keep the active VHDL tab's draft persisted while typing. */
+  /* Keep the active VHDL/FPGA tab's draft persisted while typing. */
   const vhdlSourceChange = useCallback((src: string) => {
     const t = tabsRef.current.find(t => t.id === activeTabRef.current);
-    if (t?.kind !== 'vhdl') return;
+    if (t?.kind !== 'vhdl' && t?.kind !== 'fpga') return;
     t.vhdlSource = src;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(persistTabs, 400);
@@ -664,6 +693,8 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   const activeMeta = tabs.find(t => t.id === activeTab);
   const editingChip = activeMeta?.chipId ? chips.find(c => c.id === activeMeta.chipId) : undefined;
   const activeVhdl = activeMeta?.kind === 'vhdl';
+  const activeFpga = activeMeta?.kind === 'fpga';
+  const activeFullscreen = activeVhdl || activeFpga;
   const activeVhdlChip = activeVhdl && activeMeta?.vhdlChipId ? chips.find(c => c.id === activeMeta.vhdlChipId) : undefined;
 
   const openSaveChip = () => {
@@ -1092,7 +1123,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
      inside the dropdown menu on mobile. */
   const titleTools = (
     <>
-      {!activeVhdl && (
+      {!activeFullscreen && (
         <>
           <div id="zoomgrp">
             <button onClick={() => api().zoomOut()} title="Zoom out" aria-label="Zoom out">−</button>
@@ -1113,9 +1144,12 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       <button className={'tbtn' + (activeVhdl ? ' on' : '')}
         title="Write a VHDL entity + architecture and use it as a chip — opens a fullscreen code editor tab"
         onClick={() => openVhdlTab()}>VHDL</button>
+      <button className={'tbtn' + (activeFpga ? ' on' : '')}
+        title="Program a 3D Basys 3 (AMD Artix-7) FPGA trainer board from VHDL — switches, buttons, LEDs and 7-segment display"
+        onClick={openFpgaTab}>FPGA board</button>
       <button className="tbtn" onClick={() => setCommunityOpen(true)}
         title="Browse chips shared by other builders — or share your own">Community</button>
-      {!activeVhdl && (editingChip
+      {!activeFullscreen && (editingChip
         ? <button className="tbtn primary" onClick={updateChip}
             title={`Apply this circuit as the new internals of “${editingChip.name}”`}>Update chip</button>
         : <button className="tbtn primary" onClick={openSaveChip}>Save as chip</button>)}
@@ -1179,7 +1213,7 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         </AnimatePresence>
       )}
 
-      <div id="main" style={activeVhdl ? { display: 'none' } : undefined} aria-hidden={activeVhdl || undefined}>
+      <div id="main" style={activeFullscreen ? { display: 'none' } : undefined} aria-hidden={activeFullscreen || undefined}>
         <nav id="palette" aria-label="Component palette" style={{ width: palWidth }}
           className={(drag ? 'dragging-chip' : '') + (drawerOpen ? ' open' : '')}>
           {/* mobile-only drawer handle (hidden by CSS on wider screens) */}
@@ -1780,6 +1814,14 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         />
       )}
 
+      {activeFpga && (
+        <FpgaBoard
+          key={activeTab}
+          initialSource={tabsRef.current.find(t => t.id === activeTab)?.vhdlSource ?? FPGA_TEMPLATE}
+          onSourceChange={vhdlSourceChange}
+        />
+      )}
+
       <AnimatePresence>
         {timingOpen && <TimingPanel key="timing" api={api} onClose={() => setTimingOpen(false)} />}
       </AnimatePresence>
@@ -1788,13 +1830,15 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
         <div className="tabscroll">
           {tabs.map(t => (
             <div key={t.id} role="tab" aria-selected={t.id === activeTab}
-              className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '') + (t.kind === 'vhdl' ? ' vhdltab' : '')}
+              className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '') + (t.kind === 'vhdl' ? ' vhdltab' : '') + (t.kind === 'fpga' ? ' fpgatab' : '')}
               title={t.kind === 'vhdl'
                 ? `VHDL module editor — double-click to rename`
-                : t.chipId ? `Editing the internals of “${t.name}” — double-click to rename` : 'Double-click to rename'}
+                : t.kind === 'fpga'
+                  ? `Basys 3 FPGA board — VHDL-programmable, double-click to rename`
+                  : t.chipId ? `Editing the internals of “${t.name}” — double-click to rename` : 'Double-click to rename'}
               onPointerDown={() => switchTab(t.id)}
               onDoubleClick={() => { setRenaming(t.id); setRenameDraft(t.name); }}>
-              {(t.chipId || t.kind === 'vhdl') && <span className="edtab-dot" aria-hidden="true" />}
+              {(t.chipId || t.kind) && <span className="edtab-dot" aria-hidden="true" />}
               {renaming === t.id ? (
                 <input
                   autoFocus
