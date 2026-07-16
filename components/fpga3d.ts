@@ -169,7 +169,7 @@ export function createBasys3Scene(mount: HTMLElement, opts: Basys3SceneOpts): { 
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.12;
+  renderer.toneMappingExposure = 1.28;
   mount.appendChild(renderer.domElement);
   renderer.domElement.style.touchAction = 'none';
   renderer.domElement.style.display = 'block';
@@ -178,17 +178,24 @@ export function createBasys3Scene(mount: HTMLElement, opts: Basys3SceneOpts): { 
   scene.background = new THREE.Color('#17171c');
   const camera = new THREE.PerspectiveCamera(36, 1, 1, 2000);
 
-  scene.add(new THREE.HemisphereLight(0x9fb2c8, 0x14161c, 1.05));
-  const key = new THREE.DirectionalLight(0xffffff, 1.35);
+  /* four-part rig so the black PCB never goes murky: ambient floor,
+     sky/ground hemisphere, a shadow-casting key, a cool fill and a rim
+     light that edges the connectors against the dark backdrop */
+  scene.add(new THREE.AmbientLight(0xffffff, 0.38));
+  scene.add(new THREE.HemisphereLight(0xbccfe4, 0x1e222a, 1.3));
+  const key = new THREE.DirectionalLight(0xffffff, 1.75);
   key.position.set(110, 230, 150);
   key.castShadow = true;
   key.shadow.mapSize.set(2048, 2048);
   const sc = key.shadow.camera;
   sc.left = -130; sc.right = 130; sc.top = 130; sc.bottom = -130; sc.far = 600;
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0xa9c2ff, 0.4);
+  const fill = new THREE.DirectionalLight(0xa9c2ff, 0.65);
   fill.position.set(-160, 120, -140);
   scene.add(fill);
+  const rim = new THREE.DirectionalLight(0xdfe8ff, 0.55);
+  rim.position.set(20, 60, -230);
+  scene.add(rim);
 
   /* soft shadow catcher under the floating board */
   const floor = new THREE.Mesh(
