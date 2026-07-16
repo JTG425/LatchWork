@@ -9,7 +9,7 @@ export const CC_PREFIX = 'communitychips/';
 /* The signed-in user reduced to a public display name (never the
    Auth0 sub or full email). null → not signed in. */
 export async function communityUser(): Promise<{ name: string } | null> {
-  if (!authConfigured) return null;
+  if (!authConfigured || !auth0) return null;
   try {
     const session = await auth0.getSession();
     const u = session?.user;

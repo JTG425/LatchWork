@@ -199,7 +199,10 @@ export default function TimingPanel({ api, onClose }: {
       const s = JSON.parse(localStorage.getItem(LS_TIMING) || 'null');
       if (s && typeof s.h === 'number') setBodyH(clampBodyH(s.h));
     } catch {}
-    const onR = () => setTick(v => v + 1);
+    const onR = () => {
+      setBodyH(h => clampBodyH(h));
+      setTick(v => v + 1);
+    };
     window.addEventListener('resize', onR);
     return () => window.removeEventListener('resize', onR);
   }, []);
@@ -272,19 +275,26 @@ export default function TimingPanel({ api, onClose }: {
   /* drag the grip to resize the panel — capped at half the screen */
   const startResize = (e: React.PointerEvent) => {
     e.preventDefault();
+    const pointerId = e.pointerId;
     const startY = e.clientY, startH = bodyH;
     let h = startH;
     const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
       h = clampBodyH(startH + (startY - ev.clientY));
       setBodyH(h);
     };
-    const up = () => {
+    const finish = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      window.removeEventListener('blur', finish);
       try { localStorage.setItem(LS_TIMING, JSON.stringify({ h })); } catch {}
     };
+    const up = (ev: PointerEvent) => { if (ev.pointerId === pointerId) finish(); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    window.addEventListener('blur', finish);
   };
 
   /* ── the plotted window ── */

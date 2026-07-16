@@ -164,17 +164,62 @@ export const busTextChars = (n: number) => (n > BINARY_VALUE_MAX_BITS ? 2 + Math
 /* Older saves used directed { from: output pin, to: input pin } wires. */
 export function normalizeWires(list: unknown): Wire[] {
   if (!Array.isArray(list)) return [];
-  return list.map((w: any) => {
-    if (w && w.from && w.to) {
-      return {
-        id: w.id,
-        a: { comp: w.from.comp, side: 'out' as const, pin: w.from.pin },
-        b: { comp: w.to.comp, side: 'in' as const, pin: w.to.pin },
-        ...(w.via ? { via: w.via } : {}),
-      };
+  const record = (v: unknown): Record<string, unknown> | null =>
+    typeof v === 'object' && v !== null ? v as Record<string, unknown> : null;
+  const point = (v: unknown): Vec | null => {
+    const p = record(v);
+    return p && typeof p.x === 'number' && Number.isFinite(p.x)
+      && typeof p.y === 'number' && Number.isFinite(p.y)
+      ? { x: p.x, y: p.y }
+      : null;
+  };
+  const pin = (v: unknown, forcedSide?: 'in' | 'out'): PinEnd | null => {
+    const p = record(v);
+    const side = forcedSide ?? p?.side;
+    return p && typeof p.comp === 'string' && p.comp.length > 0
+      && (side === 'in' || side === 'out')
+      && typeof p.pin === 'number' && Number.isInteger(p.pin) && p.pin >= 0
+      ? { comp: p.comp, side, pin: p.pin }
+      : null;
+  };
+  const end = (v: unknown): WireEnd | null => {
+    const e = record(v);
+    if (!e) return null;
+    if ('comp' in e) return pin(e);
+    if ('wire' in e) {
+      const p = point(e);
+      return p && typeof e.wire === 'string' && e.wire.length > 0
+        ? { wire: e.wire, ...p }
+        : null;
     }
-    return w as Wire;
-  });
+    return point(e);
+  };
+
+  const seenIds = new Set<string>();
+  const out: Wire[] = [];
+  for (const raw of list) {
+    const w = record(raw);
+    if (!w || typeof w.id !== 'string' || !w.id.length || seenIds.has(w.id)) continue;
+
+    const legacy = w.from !== undefined || w.to !== undefined;
+    const a = legacy ? pin(w.from, 'out') : end(w.a);
+    const b = legacy ? pin(w.to, 'in') : end(w.b);
+    if (!a || !b) continue;
+
+    const via = Array.isArray(w.via)
+      ? w.via.map(point).filter((p): p is Vec => p !== null)
+      : [];
+    const bits = clampBits(typeof w.bits === 'number' ? w.bits : undefined);
+    out.push({
+      id: w.id,
+      a,
+      b,
+      ...(via.length ? { via } : {}),
+      ...(bits > 1 ? { bits } : {}),
+    });
+    seenIds.add(w.id);
+  }
+  return out;
 }
 
 /* ── wire auto-routing ──────────────────────────────────────────────
@@ -502,7 +547,7 @@ const PRIM: Record<Exclude<CompType, 'CHIP' | GateType>, CompGeom> = {
     outs: [{ x: 100, y: 20, name: 'Q' }, { x: 100, y: 40, name: 'Q̄' }],
   },
   JKFF: {
-    name: 'JK Latch', sub: 'fall-edge J/K', w: 90, h: 80,
+    name: 'JK Flip-Flop', sub: 'fall-edge J/K', w: 90, h: 80,
     ins: [{ x: -20, y: 20, name: 'J' }, { x: -20, y: 40, name: 'CLK' }, { x: -20, y: 60, name: 'K' }],
     outs: [{ x: 110, y: 20, name: 'Q' }, { x: 110, y: 60, name: 'Q̄' }],
   },
@@ -586,7 +631,10 @@ export const chipMinH = (def: ChipDef) =>
    simulation only resolves a few tens of hertz — faster clocks are
    meant for the timing diagram's fixed-length virtual-time runs. */
 export const CLK_MIN_HZ = 0.1, CLK_MAX_HZ = 100e6;
-export const clampFreq = (hz?: number) => Math.min(CLK_MAX_HZ, Math.max(CLK_MIN_HZ, hz ?? 1));
+export const clampFreq = (hz?: number) => {
+  const f = Number.isFinite(hz) ? hz! : 1;
+  return Math.min(CLK_MAX_HZ, Math.max(CLK_MIN_HZ, f));
+};
 
 /* "2.5Hz" / "10kHz" / "1MHz" — the unit a frequency reads best in. */
 export const formatFreq = (hz?: number): string => {
@@ -830,7 +878,9 @@ export function getGeom(c: Pick<Comp, 'type' | 'chipId' | 'nIns' | 'bits' | 'w' 
   return PRIM[c.type];
 }
 
-const bit = (v: BusVal | undefined) => (v ? 1 : 0);
+/* A scalar pin samples bit zero of a bus. Using JS truthiness here would
+   incorrectly turn values such as 0b10 into logic-high at a 1-bit pin. */
+const bit = (v: BusVal | undefined) => Number(toBigVal(v) & 1n);
 const MEMORY_TYPES: ReadonlySet<CompType> = new Set(['SRLATCH', 'DLATCH', 'JKFF', 'DFF', 'SRFF', 'TFF', 'SHIFT']);
 /* Memory pins that stay 1-bit controls no matter the cell's data width. */
 const MEMORY_CONTROL_PINS: ReadonlySet<string> = new Set(['CLK', 'EN']);
@@ -993,6 +1043,38 @@ const orOverKeys = (state: SimState, keys?: string[]) => {
   return v;
 };
 
+/* A net may carry a wider value than one of its receivers. Pin width is
+   the boundary: scalar pins sample bit zero, while bus pins keep exactly
+   their declared low-order bits. */
+const readInputs = (id: string, g: CompGeom, state: SimState, nets: NetInfo): bigint[] =>
+  g.ins.map((p, i) => maskVal(orOverKeys(state, nets.inputDrivers.get(id + ':' + i)), p.bits ?? 1));
+
+/* Component geometry can change while a simulation state stays alive
+   (splitter count, edited custom-chip pins, deleted parts). Values for old
+   output keys would otherwise remain electrical drivers forever. Keep all
+   three state tables aligned with the board before resolving a pass. */
+function pruneSimState(comps: Comp[], state: SimState, lib: ChipLib): void {
+  const compIds = new Set<string>();
+  const inputCounts = new Map<string, number>();
+  const outputKeys = new Set<string>();
+  const chipIds = new Set<string>();
+
+  for (const c of comps) {
+    compIds.add(c.id);
+    const g = getGeom(c, lib);
+    inputCounts.set(c.id, g.ins.length);
+    for (let i = 0; i < g.outs.length; i++) outputKeys.add(c.id + ':' + i);
+    if (c.type === 'CHIP' && c.chipId && lib[c.chipId]) chipIds.add(c.id);
+  }
+
+  for (const key of Object.keys(state.vals)) if (!outputKeys.has(key)) delete state.vals[key];
+  state.prevIns ??= {};
+  for (const id of Object.keys(state.prevIns)) {
+    if (!compIds.has(id) || state.prevIns[id].length !== inputCounts.get(id)) delete state.prevIns[id];
+  }
+  for (const id of Object.keys(state.sub)) if (!chipIds.has(id)) delete state.sub[id];
+}
+
 const hasEdge = (c: Comp) => c.edge === 'rise' || c.edge === 'fall';
 export const edgeableComp = (c: Pick<Comp, 'type'>) =>
   c.type === 'CHIP' || isGateType(c.type) || EDGE_MEMORY_TYPES.has(c.type);
@@ -1027,7 +1109,7 @@ function refreshInputSnapshots(comps: Comp[], state: SimState, lib: ChipLib, net
   state.prevIns ??= {};
   for (const c of comps) {
     const g = getGeom(c, lib);
-    const ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
+    const ins = readInputs(c.id, g, state, nets);
     if (captureInputs) c._ins = ins; else delete c._ins;
     state.prevIns[c.id] = ins.map(bit);
   }
@@ -1044,13 +1126,56 @@ function refreshInputSnapshots(comps: Comp[], state: SimState, lib: ChipLib, net
    inputs win; hold keeps an existing complementary state, and an invalid
    power-on hold gets one deterministic complementary state.
 */
-function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipLib, nets: NetInfo): boolean {
+interface CrossCoupledLatch {
+  a: Comp;
+  b: Comp;
+  ga: CompGeom;
+  gb: CompGeom;
+  ai: number;
+  bi: number;
+}
+
+function findCrossCoupledLatches(comps: Comp[], lib: ChipLib, nets: NetInfo): CrossCoupledLatch[] {
   const byId = new Map(comps.map(c => [c.id, c]));
+  const pairs: CrossCoupledLatch[] = [];
+  const outKey = (id: string) => `${id}:0`;
+  const inputKeys = (id: string, pin: number) => nets.inputDrivers.get(`${id}:${pin}`) ?? [];
+
+  for (const a of comps) {
+    if (a.type !== 'NAND' && a.type !== 'NOR') continue;
+    if (hasEdge(a) || clampBits(a.bits ?? 1) !== 1) continue;
+    const ga = getGeom(a, lib);
+
+    for (let ai = 0; ai < ga.ins.length; ai++) {
+      const driver = inputKeys(a.id, ai).find(k =>
+        k.endsWith(':0') && byId.get(k.slice(0, -2))?.type === a.type);
+      if (!driver) continue;
+
+      const bId = driver.slice(0, -2);
+      if (a.id >= bId) continue;
+      const b = byId.get(bId);
+      if (!b || b.type !== a.type || hasEdge(b) || clampBits(b.bits ?? 1) !== 1) continue;
+
+      const gb = getGeom(b, lib);
+      const bi = gb.ins.findIndex((_, i) => inputKeys(b.id, i).includes(outKey(a.id)));
+      if (bi < 0) continue;
+      pairs.push({ a, b, ga, gb, ai, bi });
+      break;
+    }
+  }
+  return pairs;
+}
+
+function stabilizeCrossCoupledLatches(
+  pairs: CrossCoupledLatch[],
+  state: SimState,
+  nets: NetInfo,
+  changedKeys?: Set<string>,
+): boolean {
   let changed = false;
 
   const outKey = (id: string) => `${id}:0`;
   const inputKeys = (id: string, pin: number) => nets.inputDrivers.get(`${id}:${pin}`) ?? [];
-  const readsFrom = (id: string, pin: number, driver: string) => inputKeys(id, pin).includes(driver);
   const inputValExcept = (id: string, pin: number, excludedDriver?: string) => {
     const keys = inputKeys(id, pin).filter(k => k !== excludedDriver);
     return bit(orOverKeys(state, keys));
@@ -1060,33 +1185,12 @@ function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipL
     const n = BigInt(bit(v));
     if ((state.vals[k] ?? 0n) !== n) {
       state.vals[k] = n;
+      changedKeys?.add(k);
       changed = true;
     }
   };
 
-  for (const a of comps) {
-    if (a.type !== 'NAND' && a.type !== 'NOR') continue;
-    if (hasEdge(a)) continue;
-    // the stable-state equations below are 1-bit; leave bus-width gates
-    // to the plain delta passes
-    if (clampBits(a.bits ?? 1) !== 1) continue;
-    const ga = getGeom(a, lib);
-
-    for (let ai = 0; ai < ga.ins.length; ai++) {
-      const driver = inputKeys(a.id, ai).find(k => k.endsWith(':0') && byId.get(k.slice(0, -2))?.type === a.type);
-      if (!driver) continue;
-
-      const bId = driver.slice(0, -2);
-      if (a.id >= bId) continue;
-      const b = byId.get(bId);
-      if (!b || b.type !== a.type) continue;
-      if (hasEdge(b)) continue;
-      if (clampBits(b.bits ?? 1) !== 1) continue;
-
-      const gb = getGeom(b, lib);
-      const bi = gb.ins.findIndex((_, i) => readsFrom(b.id, i, outKey(a.id)));
-      if (bi < 0) continue;
-
+  for (const { a, b, ga, gb, ai, bi } of pairs) {
       const aExternal = ga.ins.map((_, i) => inputValExcept(a.id, i, i === ai ? outKey(b.id) : undefined));
       const bExternal = gb.ins.map((_, i) => inputValExcept(b.id, i, i === bi ? outKey(a.id) : undefined));
 
@@ -1125,8 +1229,6 @@ function stabilizeCrossCoupledLatches(comps: Comp[], state: SimState, lib: ChipL
 
       setVal(a.id, nextA);
       setVal(b.id, nextB);
-      break;
-    }
   }
 
   return changed;
@@ -1144,30 +1246,44 @@ export function evaluateNet(
 ): void {
   if (depth > 12) return;
 
+  pruneSimState(comps, state, lib);
   const nets = analyzeNets(wires, tunnelPinGroups(comps));
   state.prevIns ??= {};
 
-  /*
-     Important simulator fix:
+  /* Components affected in the same delta are evaluated against one shared
+     snapshot and committed together. That preserves order-independent
+     feedback and makes flip-flops on a shared clock sample pre-edge inputs.
+     Only consumers of changed outputs enter the next delta, so a long chain
+     resolves in linear work instead of rescanning the whole board per stage. */
+  const byId = new Map(comps.map(c => [c.id, c]));
+  const consumers = new Map<string, Set<string>>();
+  for (const [inputKey, drivers] of nets.inputDrivers) {
+    const split = inputKey.lastIndexOf(':');
+    const id = split >= 0 ? inputKey.slice(0, split) : inputKey;
+    if (!byId.has(id)) continue;
+    for (const driver of drivers) {
+      let ids = consumers.get(driver);
+      if (!ids) { ids = new Set(); consumers.set(driver, ids); }
+      ids.add(id);
+    }
+  }
 
-     The old engine wrote each component's output directly into state.vals
-     while iterating through the component list. That made feedback circuits
-     depend on array order, which is especially bad for SR latches, JK
-     flip-flops, and counters.
-
-     This version computes a whole pass into nextVals, then commits all
-     outputs together. That gives each pass delta-cycle behavior instead of
-     immediate ripple-through behavior.
-  */
-  const passes = Math.min(48, Math.max(8, comps.length * 2 + 4));
+  /* A delta wave advances at most one component per pass. The board-scaled
+     ceiling bounds genuinely oscillating feedback without truncating deep
+     but acyclic circuits. */
+  const passes = Math.max(8, comps.length * 2 + 4);
   const edgeFired = new Set<string>();
+  const latchPairs = findCrossCoupledLatches(comps, lib, nets);
+  let dirty = new Set(comps.map(c => c.id));
 
-  for (let k = 0; k < passes; k++) {
+  for (let k = 0; k < passes && dirty.size; k++) {
     const nextVals: Record<string, bigint> = {};
 
-    for (const c of comps) {
+    for (const id of dirty) {
+      const c = byId.get(id);
+      if (!c) continue;
       const g = getGeom(c, lib);
-      const ins = g.ins.map((_, i) => orOverKeys(state, nets.inputDrivers.get(c.id + ':' + i)));
+      const ins = readInputs(c.id, g, state, nets);
       if (captureInputs) c._ins = ins; else delete c._ins;
 
       let outs: BusVal[];
@@ -1192,19 +1308,25 @@ export function evaluateNet(
       }
     }
 
-    let changed = false;
+    const changedKeys = new Set<string>();
 
     for (const [key, val] of Object.entries(nextVals)) {
       if ((state.vals[key] ?? 0n) !== val) {
         state.vals[key] = val;
-        changed = true;
+        changedKeys.add(key);
       }
     }
 
-    if (stabilizeCrossCoupledLatches(comps, state, lib, nets)) changed = true;
+    if (latchPairs.length) stabilizeCrossCoupledLatches(latchPairs, state, nets, changedKeys);
 
     // Once a pass produces no output changes, the circuit has settled.
-    if (!changed) break;
+    if (!changedKeys.size) break;
+
+    const nextDirty = new Set<string>();
+    for (const key of changedKeys) {
+      for (const id of consumers.get(key) ?? []) nextDirty.add(id);
+    }
+    dirty = nextDirty;
   }
 
   refreshInputSnapshots(comps, state, lib, nets, captureInputs);
