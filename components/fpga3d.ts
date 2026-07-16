@@ -167,7 +167,7 @@ export function createBasys3Scene(mount: HTMLElement, opts: Basys3SceneOpts): { 
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(mount.clientWidth || 1, mount.clientHeight || 1);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.28;
   mount.appendChild(renderer.domElement);

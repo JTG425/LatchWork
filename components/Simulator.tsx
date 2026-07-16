@@ -1968,10 +1968,8 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       <div id="tabbar" role="tablist" aria-label="Editor tabs">
         <div className="tabscroll">
           {tabs.map(t => (
-            <div key={t.id} role="tab" aria-selected={t.id === activeTab}
-              className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '') + (t.kind === 'vhdl' ? ' vhdltab' : '') + (t.kind === 'fpga' ? ' fpgatab' : '')}
             <div key={t.id} role="tab" aria-selected={t.id === activeTab} tabIndex={0}
-              className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '') + (t.kind === 'vhdl' ? ' vhdltab' : '')}
+              className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '') + (t.kind === 'vhdl' ? ' vhdltab' : '') + (t.kind === 'fpga' ? ' fpgatab' : '')}
               title={t.kind === 'vhdl'
                 ? `VHDL module editor — double-click to rename`
                 : t.kind === 'fpga'
