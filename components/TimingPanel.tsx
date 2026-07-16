@@ -14,7 +14,7 @@
      a joint truth-table count across every input set to it); the run
      applies step s's values, lets the board settle (a full clock cycle
      per step when clocks exist), and plots driven inputs + probes.
-
+help
    Extras: drag the top grip to resize (up to half the screen), a
    vertical cursor line tracks the pointer, clicking drops a labelable
    marker line to annotate the plot, and the diagram exports as a PNG. */
