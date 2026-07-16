@@ -4,7 +4,7 @@ import { auth0, authConfigured } from '@/auth';
 export default async function Home() {
   let user: SimUser | null = null;
 
-  if (authConfigured) {
+  if (authConfigured && auth0) {
     try {
       const session = await auth0.getSession();
       if (session?.user) {

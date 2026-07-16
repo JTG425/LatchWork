@@ -70,7 +70,7 @@ class Pending {
       this.staged.set(t.name, maskW(val, w));
     } else if (t.kind === 'index') {
       const i = Number(t.idx.f(this.ctx));
-      if (i < 0 || i >= w) return;
+      if (!Number.isSafeInteger(i) || i < 0 || i >= w) return;
       const b = 1n << BigInt(i);
       this.staged.set(t.name, (this.cur(t.name) & ~b) | ((val & 1n) ? b : 0n));
     } else {
@@ -79,10 +79,14 @@ class Pending {
       this.staged.set(t.name, (this.cur(t.name) & ~m) | ((maskW(val, span)) << BigInt(t.lo)));
     }
   }
-  commit(): boolean {
-    let changed = false;
+  commit(): { name: string; before: bigint; after: bigint }[] {
+    const changed: { name: string; before: bigint; after: bigint }[] = [];
     for (const [k, v] of this.staged) {
-      if ((this.ctx.sig.get(k) ?? 0n) !== v) { this.ctx.sig.set(k, v); changed = true; }
+      const before = this.ctx.sig.get(k) ?? 0n;
+      if (before !== v) {
+        this.ctx.sig.set(k, v);
+        changed.push({ name: k, before, after: v });
+      }
     }
     this.staged.clear();
     return changed;
@@ -94,6 +98,10 @@ type SeqStmt = (ctx: Ctx, out: Pending) => void;
 interface Proc {
   /* variables declared in the process (lowercased name → width) */
   vars: Record<string, number>;
+  /* VHDL process variables are static and their initializer is applied
+     once, when the module instance is first elaborated. */
+  init: Record<string, bigint>;
+  sensitivity: string[] | 'all';
   body: SeqStmt[];
 }
 
@@ -112,6 +120,26 @@ export interface VhdlModule {
 }
 
 const maskW = (v: bigint, w: number): bigint => v & ((1n << BigInt(Math.max(1, Math.min(VHDL_MAX_BITS, w)))) - 1n);
+
+/* Clamp logical shifts before handing the count to JavaScript.  A bus can
+   hold an enormous shift count; shifting a BigInt by it can otherwise throw
+   or try to allocate an impractically large value.  For a fixed-width VHDL
+   value every logical shift by at least its width is simply zero. */
+const logicalShift = (
+  v: bigint,
+  count: bigint,
+  width: number,
+  left: boolean,
+  reverseNegative = false,
+): bigint => {
+  const w = Math.max(1, Math.min(VHDL_MAX_BITS, width));
+  /* VHDL's sll/srl operators accept INTEGER: a negative count reverses
+     direction. numeric_std shift_left/shift_right take NATURAL, so their
+     call sites leave reverseNegative false and safely return zero. */
+  if (count < 0n) return reverseNegative ? logicalShift(v, -count, w, !left, false) : 0n;
+  if (count >= BigInt(w)) return 0n;
+  return left ? maskW(v << count, w) : maskW(v, w) >> count;
+};
 
 /* ── lexer ──────────────────────────────────────────────────────── */
 
@@ -170,11 +198,15 @@ function lex(src: string): Tok[] {
         const close = src.indexOf('#', j + 1);
         if (close < 0) throw new VErr(line, 'Unterminated based literal.');
         const base = parseInt(digits, 10);
+        if (!Number.isInteger(base) || base < 2 || base > 16) {
+          throw new VErr(line, `Based-literal radix ${digits} is outside VHDL's 2–16 range.`);
+        }
         const body = src.slice(j + 1, close).replace(/_/g, '');
+        if (!body) throw new VErr(line, 'A based literal needs at least one digit.');
         let v = 0n;
         for (const d of body) {
           const dv = parseInt(d, base);
-          if (Number.isNaN(dv)) throw new VErr(line, `Bad digit '${d}' for base ${base}.`);
+          if (Number.isNaN(dv) || dv >= base) throw new VErr(line, `Bad digit '${d}' for base ${base}.`);
           v = v * BigInt(base) + BigInt(dv);
         }
         push('num', body, digits + '#' + body + '#', v, 0);
@@ -269,6 +301,8 @@ class Compiler {
   processes: Proc[] = [];
   usesEdges = false;
   entityName = '';
+  architectureEntity = '';
+  architectureSeen = false;
   /* variables of the process currently being compiled */
   curVars: Record<string, number> | null = null;
 
@@ -305,6 +339,10 @@ class Compiler {
       throw new VErr(t.line, `Unexpected '${t.raw}' at the top level — expected entity or architecture.`);
     }
     if (!this.entityName) throw new VErr(1, 'No entity found — declare one with: entity NAME is port (…); end;');
+    if (!this.architectureSeen) throw new VErr(1, `No architecture found for entity '${this.entityName}'.`);
+    if (this.architectureEntity !== this.entityName.toLowerCase()) {
+      throw new VErr(1, `Architecture targets '${this.architectureEntity}', not entity '${this.entityName}'.`);
+    }
     if (!this.ports.length) throw new VErr(1, 'The entity has no ports — add at least one in and one out port.');
     if (!this.ports.some(p => p.dir === 'out')) throw new VErr(1, 'The entity needs at least one out port.');
     return {
@@ -336,7 +374,10 @@ class Compiler {
     if (this.at('port')) this.parsePorts();
     this.expect('end');
     this.eat('entity');
-    if (this.peek().k === 'id' && !RESERVED.has(this.peek().v)) this.next();
+    if (this.peek().k === 'id' && !RESERVED.has(this.peek().v)) {
+      const endName = this.next();
+      if (endName.v !== nameTok.v) throw new VErr(endName.line, `Entity ends as '${endName.raw}', but was declared as '${nameTok.raw}'.`);
+    }
     this.expect(';');
   }
 
@@ -388,6 +429,13 @@ class Compiler {
   parseTypeRef(): number {
     const t = this.ident('a type name');
     const base = t.v;
+    const checkedWidth = (width: bigint | number): number => {
+      const n = typeof width === 'bigint' ? Number(width) : width;
+      if (!Number.isSafeInteger(n) || n < 1 || n > VHDL_MAX_BITS) {
+        throw new VErr(t.line, `Type '${t.raw}' is ${String(width)} bits wide — widths must be 1–${VHDL_MAX_BITS}.`);
+      }
+      return n;
+    };
     if (base === 'std_logic' || base === 'std_ulogic' || base === 'bit' || base === 'boolean') return 1;
     if (base === 'std_logic_vector' || base === 'std_ulogic_vector' || base === 'bit_vector'
       || base === 'unsigned' || base === 'signed') {
@@ -398,7 +446,7 @@ class Compiler {
       this.expect(')');
       const hi = desc ? a.v : b.v, lo = desc ? b.v : a.v;
       if (lo !== 0n) throw new VErr(t.line, `Vector ranges must end at 0 (got ${desc ? `${a.v} downto ${b.v}` : `${a.v} to ${b.v}`}).`);
-      return Number(hi - lo + 1n);
+      return checkedWidth(hi - lo + 1n);
     }
     if (base === 'integer' || base === 'natural' || base === 'positive') {
       if (this.eat('range')) {
@@ -407,7 +455,7 @@ class Compiler {
         const hiV = this.constExpr().v;
         let w = 1;
         while ((1n << BigInt(w)) - 1n < hiV && w < VHDL_MAX_BITS) w++;
-        return w;
+        return checkedWidth(w);
       }
       return 32;
     }
@@ -418,9 +466,15 @@ class Compiler {
 
   parseArchitecture() {
     this.expect('architecture');
-    this.ident('an architecture name');
+    const archName = this.ident('an architecture name');
+    if (this.architectureSeen) throw new VErr(archName.line, 'Only one architecture per module is supported.');
+    this.architectureSeen = true;
     this.expect('of');
-    this.ident('the entity name');
+    const entity = this.ident('the entity name');
+    this.architectureEntity = entity.v;
+    if (this.entityName && entity.v !== this.entityName.toLowerCase()) {
+      throw new VErr(entity.line, `Architecture targets '${entity.raw}', not entity '${this.entityName}'.`);
+    }
     this.expect('is');
 
     /* declarations */
@@ -446,7 +500,10 @@ class Compiler {
     }
     this.expect('end');
     this.eat('architecture');
-    if (this.peek().k === 'id' && !RESERVED.has(this.peek().v)) this.next();
+    if (this.peek().k === 'id' && !RESERVED.has(this.peek().v)) {
+      const endName = this.next();
+      if (endName.v !== archName.v) throw new VErr(endName.line, `Architecture ends as '${endName.raw}', but was declared as '${archName.raw}'.`);
+    }
     this.expect(';');
   }
 
@@ -522,6 +579,7 @@ class Compiler {
       const sel = this.expr();
       this.expect('select');
       const target = this.parseTarget();
+      this.assertWritableSignal(target, t.line);
       this.expect('<=');
       const arms: { choices: bigint[] | null; e: CExpr }[] = [];
       for (;;) {
@@ -555,6 +613,7 @@ class Compiler {
 
     // simple / conditional assignment: target <= e [when cond else e …];
     const target = this.parseTarget();
+    this.assertWritableSignal(target, t.line);
     this.expect('<=');
     const expr = this.parseWaveform();
     this.expect(';');
@@ -588,6 +647,7 @@ class Compiler {
     if (this.curVars?.[name] === undefined && this.widths[name] === undefined) {
       throw new VErr(nm.line, `'${nm.raw}' is not a declared signal.`);
     }
+    const width = this.curVars?.[name] ?? this.widths[name]!;
     if (this.eat('(')) {
       const a = this.expr();
       if (this.at('downto') || this.at('to')) {
@@ -597,12 +657,31 @@ class Compiler {
         let av: bigint, bv: bigint;
         try { av = a.f(probeCtx()); bv = b.f(probeCtx()); } catch { throw new VErr(nm.line, 'Slice bounds must be constant.'); }
         const hi = Number(desc ? av : bv), lo = Number(desc ? bv : av);
+        if (!Number.isSafeInteger(lo) || !Number.isSafeInteger(hi) || lo < 0 || hi < lo || hi >= width) {
+          throw new VErr(nm.line, `Slice (${hi} downto ${lo}) is outside '${nm.raw}' (${width} bits).`);
+        }
         return { kind: 'slice', name, hi, lo };
       }
       this.expect(')');
+      try {
+        const idx = Number(a.f(probeCtx()));
+        if (!Number.isSafeInteger(idx) || idx < 0 || idx >= width) {
+          throw new VErr(nm.line, `Index ${idx} is outside '${nm.raw}' (${width} bits).`);
+        }
+      } catch (e) {
+        if (e instanceof VErr) throw e; // a constant, out-of-range index
+        // A signal/variable index is checked safely at runtime.
+      }
       return { kind: 'index', name, idx: a };
     }
     return { kind: 'whole', name };
+  }
+
+  assertWritableSignal(target: Target, line: number) {
+    const port = this.ports.find(p => p.name.toLowerCase() === target.name);
+    if (port?.dir === 'in') {
+      throw new VErr(line, `Input port '${port.name}' cannot be assigned inside the architecture.`);
+    }
   }
 
   /* when choices: literal | literal | others */
@@ -618,20 +697,32 @@ class Compiler {
 
   /* — processes — */
   parseProcess() {
-    this.expect('process');
-    if (this.eat('(')) {         // sensitivity list — parsed, not needed
-      if (!this.eat(')')) {
-        for (;;) {
-          if (this.eat('all')) { /* process(all) */ } else this.ident('a signal name');
-          if (this.eat(',')) continue;
-          this.expect(')');
-          break;
-        }
+    const processTok = this.expect('process');
+    if (!this.eat('(')) {
+      throw new VErr(processTok.line, 'A process needs a sensitivity list (or process(all)); wait statements are not supported.');
+    }
+
+    let sensitivity: string[] | 'all';
+    if (this.eat('all')) {
+      sensitivity = 'all';
+      this.expect(')');
+    } else {
+      const names: string[] = [];
+      if (this.eat(')')) throw new VErr(processTok.line, 'A process sensitivity list cannot be empty.');
+      for (;;) {
+        const sig = this.ident('a signal name');
+        if (this.widths[sig.v] === undefined) throw new VErr(sig.line, `'${sig.raw}' is not a declared signal.`);
+        if (!names.includes(sig.v)) names.push(sig.v);
+        if (this.eat(',')) continue;
+        this.expect(')');
+        break;
       }
+      sensitivity = names;
     }
     this.eat('is');
 
     const vars: Record<string, number> = {};
+    const init: Record<string, bigint> = {};
     this.curVars = vars;
     while (!this.at('begin')) {
       const t = this.peek();
@@ -641,11 +732,12 @@ class Compiler {
         while (this.eat(',')) names.push(this.ident('a variable name'));
         this.expect(':');
         const width = this.parseTypeRef();
-        if (this.eat(':=')) this.constExpr();   // initial value re-applied as 0 default
+        const initial = this.eat(':=') ? maskW(this.constExpr().v, width) : 0n;
         this.expect(';');
         for (const nm of names) {
           if (vars[nm.v] !== undefined || this.widths[nm.v] !== undefined) throw new VErr(nm.line, `'${nm.raw}' is declared twice.`);
           vars[nm.v] = width;
+          init[nm.v] = initial;
         }
         continue;
       }
@@ -660,7 +752,7 @@ class Compiler {
     if (this.peek().k === 'id' && !RESERVED.has(this.peek().v)) this.next();
     this.expect(';');
     this.curVars = null;
-    this.processes.push({ vars, body });
+    this.processes.push({ vars, init, sensitivity, body });
   }
 
   parseSeqBody(stops: string[]): SeqStmt[] {
@@ -744,6 +836,7 @@ class Compiler {
         if (target.kind === 'whole') nv = maskW(e.f(ctx), w);
         else if (target.kind === 'index') {
           const i = Number(target.idx.f(ctx));
+          if (!Number.isSafeInteger(i) || i < 0 || i >= w) return;
           const b = 1n << BigInt(i);
           nv = (cur & ~b) | ((e.f(ctx) & 1n) ? b : 0n);
         } else {
@@ -756,6 +849,7 @@ class Compiler {
     }
     this.expect('<=', `after '${target.name}'`);
     if (this.widths[target.name] === undefined) throw new VErr(t.line, `'<=' assigns signals — '${target.name}' is a variable (use ':=').`);
+    this.assertWritableSignal(target, t.line);
     const e = this.expr();
     this.expect(';');
     return (ctx, out) => out.write(target, e.f(ctx));
@@ -814,8 +908,8 @@ class Compiler {
       const mw = a.w || VHDL_MAX_BITS;
       const af = a.f, bf = b.f;
       a = t.v === 'sll'
-        ? { w: a.w, f: ctx => maskW(af(ctx) << bf(ctx), mw) }
-        : { w: a.w, f: ctx => af(ctx) >> bf(ctx) };
+        ? { w: a.w, f: ctx => logicalShift(af(ctx), bf(ctx), mw, true, true) }
+        : { w: a.w, f: ctx => logicalShift(af(ctx), bf(ctx), mw, false, true) };
     }
   }
 
@@ -836,8 +930,8 @@ class Compiler {
         const w = Math.min(VHDL_MAX_BITS, Math.max(a.w, b.w));
         const mw = w || VHDL_MAX_BITS;
         a = t.v === '+'
-          ? { w, f: ctx => maskW(af(ctx) + bf(ctx), mw) }
-          : { w, f: ctx => maskW(af(ctx) - bf(ctx), mw) };
+          ? { w, f: ctx => w ? maskW(af(ctx) + bf(ctx), mw) : af(ctx) + bf(ctx) }
+          : { w, f: ctx => w ? maskW(af(ctx) - bf(ctx), mw) : af(ctx) - bf(ctx) };
       }
     }
   }
@@ -854,7 +948,7 @@ class Compiler {
       const w = Math.min(VHDL_MAX_BITS, Math.max(a.w, b.w));
       const mw = w || VHDL_MAX_BITS;
       const af = a.f, bf = b.f;
-      if (t.v === '*') a = { w, f: ctx => maskW(af(ctx) * bf(ctx), mw) };
+      if (t.v === '*') a = { w, f: ctx => w ? maskW(af(ctx) * bf(ctx), mw) : af(ctx) * bf(ctx) };
       else if (t.v === '/') a = { w, f: ctx => { const d = bf(ctx); return d ? af(ctx) / d : 0n; } };
       else a = { w, f: ctx => { const d = bf(ctx); return d ? af(ctx) % d : 0n; } };
     }
@@ -875,10 +969,14 @@ class Compiler {
       const a = this.unaryExpr();
       const mw = a.w || VHDL_MAX_BITS;   // stays universal when the operand is
       const af = a.f;
-      return { w: a.w, f: ctx => maskW(-af(ctx), mw) };
+      return { w: a.w, f: ctx => a.w ? maskW(-af(ctx), mw) : -af(ctx) };
     }
     if (t.k === 'sym' && t.v === '+') { this.next(); return this.unaryExpr(); }
-    if (t.k === 'id' && t.v === 'abs') { this.next(); return this.unaryExpr(); }   // unsigned: identity
+    if (t.k === 'id' && t.v === 'abs') {
+      this.next();
+      const a = this.unaryExpr(), af = a.f;
+      return { w: a.w, f: ctx => { const v = af(ctx); return v < 0n ? -v : v; } };
+    }
     return this.primary();
   }
 
@@ -930,13 +1028,25 @@ class Compiler {
         this.next(); this.next();
         const arg = this.expr();
         let width = arg.w;
+        let hasWidth = false;
         if (this.eat(',')) {
           const n = this.constExpr();
           width = Number(n.v);
+          hasWidth = true;
           if (width < 1 || width > VHDL_MAX_BITS) throw new VErr(t.line, `Width ${width} out of range 1–${VHDL_MAX_BITS}.`);
         }
         this.expect(')');
         const af = arg.f;
+        if (t.v === 'to_integer') {
+          if (hasWidth) throw new VErr(t.line, 'to_integer takes exactly one argument.');
+          // A VHDL integer is not constrained to the source vector's width;
+          // keeping it universal prevents e.g. to_integer("1111") + 1
+          // from wrapping at four bits before assignment.
+          return { w: 0, f: af };
+        }
+        if ((t.v === 'to_unsigned' || t.v === 'to_signed' || t.v === 'resize') && !hasWidth) {
+          throw new VErr(t.line, `${t.raw} needs a result width as its second argument.`);
+        }
         return width && width !== arg.w
           ? { w: width, f: ctx => maskW(af(ctx), width) }
           : { w: arg.w, f: af };
@@ -951,8 +1061,8 @@ class Compiler {
         const w = a.w || VHDL_MAX_BITS;
         const af = a.f, bf = b.f;
         return t.v === 'shift_left'
-          ? { w, f: ctx => maskW(af(ctx) << bf(ctx), w) }
-          : { w, f: ctx => af(ctx) >> bf(ctx) };
+          ? { w, f: ctx => logicalShift(af(ctx), bf(ctx), w, true) }
+          : { w, f: ctx => logicalShift(af(ctx), bf(ctx), w, false) };
       }
 
       /* name: enum literal, constant, signal/variable [index | slice | 'attr] */
@@ -1005,7 +1115,23 @@ class Compiler {
         }
         this.expect(')');
         const af = a.f;
-        return { w: 1, f: ctx => (read(ctx) >> af(ctx)) & 1n };
+        try {
+          const idx = af(probeCtx());
+          if (idx < 0n || idx >= BigInt(w)) {
+            throw new VErr(t.line, `Index ${idx} is outside ${t.raw}'s ${w}-bit range.`);
+          }
+        } catch (e) {
+          if (e instanceof VErr) throw e;
+          // A signal/variable index is range-checked at evaluation time.
+        }
+        return {
+          w: 1,
+          f: ctx => {
+            const raw = af(ctx);
+            if (raw < 0n || raw >= BigInt(w)) return 0n;
+            return (read(ctx) >> raw) & 1n;
+          },
+        };
       }
 
       return { w, f: read };
@@ -1042,12 +1168,12 @@ export function compileVhdl(src: string): VhdlCompileResult {
 
 /* ── evaluation ─────────────────────────────────────────────────────
    Called once per engine pass (like any chip). Signal values persist
-   in `store.vals` under 's:<name>' keys; previous samples for edge
-   detection persist in `store.prevIns['__vhdl']` in module.sigs order.
-   Edges fire during the first internal settle iteration only, and the
-   prev sample updates at the end of the call — so one input transition
-   clocks the registers exactly once no matter how many passes the
-   parent runs. */
+   in `store.vals` under 's:<name>' keys.  Each internal iteration is one
+   VHDL delta cycle: concurrent assignments and all awakened processes
+   read the same old signal snapshot, then their staged signal writes are
+   committed together.  Those commits become events for the next delta,
+   allowing derived clocks and vector 'event to behave correctly without
+   re-firing an edge on every settle pass. */
 
 export interface VhdlStore {
   vals: Record<string, bigint>;
@@ -1058,10 +1184,13 @@ const SETTLE_PASSES = 64;
 
 export function evalVhdlModule(m: VhdlModule, store: VhdlStore, ins: bigint[]): bigint[] {
   const sig = new Map<string, bigint>();
+  const previous = new Map<string, bigint>();
   const initialized = store.vals['s:__init'] === 1n;
   for (const s of m.sigs) {
     const saved = store.vals['s:' + s];
-    sig.set(s, saved !== undefined ? saved : (!initialized ? (m.init[s] ?? 0n) : 0n));
+    const value = saved !== undefined ? saved : (!initialized ? (m.init[s] ?? 0n) : 0n);
+    previous.set(s, value);
+    sig.set(s, value);
   }
   store.vals['s:__init'] = 1n;
 
@@ -1073,18 +1202,22 @@ export function evalVhdlModule(m: VhdlModule, store: VhdlStore, ins: bigint[]): 
     inIdx++;
   }
 
-  /* edge detection against the previous call's samples */
+  /* External input changes are the events in the first delta cycle.  Compare
+     the complete vector value (not merely its LSB), so vector 'event works. */
   const rise = new Set<string>(), fall = new Set<string>(), changed = new Set<string>();
-  const prev = store.prevIns['__vhdl'];
-  if (m.usesEdges && prev && prev.length === m.sigs.length) {
-    m.sigs.forEach((s, i) => {
-      const was = prev[i] ? 1 : 0;
-      const now = (sig.get(s) ?? 0n) & 1n ? 1 : 0;
-      if (was !== now) {
-        changed.add(s);
-        if (now) rise.add(s); else fall.add(s);
+  if (initialized) {
+    for (const p of m.ports) {
+      if (p.dir !== 'in') continue;
+      const name = p.name.toLowerCase();
+      const before = previous.get(name) ?? 0n;
+      const after = sig.get(name) ?? 0n;
+      if (before !== after) {
+        changed.add(name);
+        const was = (before & 1n) !== 0n, now = (after & 1n) !== 0n;
+        if (!was && now) rise.add(name);
+        if (was && !now) fall.add(name);
       }
-    });
+    }
   }
 
   const ctx: Ctx = { sig, vars: null, rise, fall, changed };
@@ -1092,26 +1225,33 @@ export function evalVhdlModule(m: VhdlModule, store: VhdlStore, ins: bigint[]): 
   /* restore persistent process variables */
   const varMaps = m.processes.map((proc, pi) => {
     const map = new Map<string, bigint>();
-    for (const v of Object.keys(proc.vars)) map.set(v, store.vals[`x:${pi}:${v}`] ?? 0n);
+    for (const v of Object.keys(proc.vars)) {
+      map.set(v, store.vals[`x:${pi}:${v}`] ?? (!initialized ? (proc.init[v] ?? 0n) : 0n));
+    }
     return map;
   });
 
   for (let pass = 0; pass < SETTLE_PASSES; pass++) {
-    let dirty = false;
+    /* One shared queue is essential: all concurrent statements/processes
+       sample this delta's old signals, independent of source order. */
+    const pend = new Pending(m, ctx);
 
     for (const ca of m.concurrent) {
-      const pend = new Pending(m, ctx);
       pend.write(ca.target, ca.expr.f(ctx));
-      if (pend.commit()) dirty = true;
     }
 
     m.processes.forEach((proc, pi) => {
+      const awake = (!initialized && pass === 0)
+        || (proc.sensitivity === 'all'
+          ? ctx.changed.size > 0
+          : proc.sensitivity.some(name => ctx.changed.has(name)));
+      if (!awake) return;
       ctx.vars = varMaps[pi];
-      const pend = new Pending(m, ctx);
       for (const st of proc.body) st(ctx, pend);
-      if (pend.commit()) dirty = true;
       ctx.vars = null;
     });
+
+    const changes = pend.commit();
 
     /* inputs are pinned — re-drive them in case something assigned one */
     inIdx = 0;
@@ -1121,10 +1261,19 @@ export function evalVhdlModule(m: VhdlModule, store: VhdlStore, ins: bigint[]): 
       inIdx++;
     }
 
-    /* an edge is an instant — after the first settle pass it's over */
-    rise.clear(); fall.clear(); changed.clear();
+    /* Signal commits schedule sensitive processes in the following delta. */
+    const nextRise = new Set<string>(), nextFall = new Set<string>(), nextChanged = new Set<string>();
+    for (const change of changes) {
+      nextChanged.add(change.name);
+      const was = (change.before & 1n) !== 0n, now = (change.after & 1n) !== 0n;
+      if (!was && now) nextRise.add(change.name);
+      if (was && !now) nextFall.add(change.name);
+    }
+    ctx.rise = nextRise;
+    ctx.fall = nextFall;
+    ctx.changed = nextChanged;
 
-    if (!dirty) break;
+    if (!changes.length) break;
   }
 
   /* persist signals, variables, and edge samples */
@@ -1133,6 +1282,8 @@ export function evalVhdlModule(m: VhdlModule, store: VhdlStore, ins: bigint[]): 
     for (const [k, v] of varMaps[pi]) store.vals[`x:${pi}:${k}`] = v;
   });
   if (m.usesEdges) {
+    /* Retained as a compact compatibility/debug snapshot for SimState.  Edge
+       detection itself uses the full-width persisted signal values above. */
     store.prevIns['__vhdl'] = m.sigs.map(s => ((sig.get(s) ?? 0n) & 1n ? 1 : 0));
   }
 

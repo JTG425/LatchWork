@@ -10,10 +10,15 @@
    A chip whose minimal machine has a single state is combinational;
    anything more is sequential and gets a state diagram. */
 
-import { ChipDef, ChipLib, Comp, SimState, newSimState, evalChip } from './engine';
+import { ChipDef, ChipLib, Comp, SimState, chipInputBits, newSimState, evalChip } from './engine';
 
-export const MAX_TT_INPUTS = 8;   // 256 rows — beyond this the table is skipped
-export const MAX_FSM_INPUTS = 4;  // 16 combos per state keeps exploration + diagram sane
+/* Limits are measured in input bits, not input pins: one 4-bit pin has the
+   same four-bit (16 combination) search space as four scalar pins.  Keep the
+   old names as aliases for callers compiled against the original API. */
+export const MAX_TT_INPUT_BITS = 8;   // 256 rows — beyond this the table is skipped
+export const MAX_FSM_INPUT_BITS = 4;  // 16 combos per state keeps exploration + diagram sane
+export const MAX_TT_INPUTS = MAX_TT_INPUT_BITS;
+export const MAX_FSM_INPUTS = MAX_FSM_INPUT_BITS;
 const RAW_STATE_CAP = 48;         // raw snapshot cap before we call it "too large"
 
 export interface TruthRow { ins: number[]; outs: bigint[] }
@@ -21,7 +26,7 @@ export interface TruthRow { ins: number[]; outs: bigint[] }
 export interface FsmEdge {
   from: number;
   to: number;
-  combos: number[];   // input combinations (bit i of combo = input i), grouped
+  combos: number[];   // flattened MSB-first input combinations, grouped
   outs: bigint[];     // outputs produced on this transition (Mealy)
 }
 
@@ -32,6 +37,8 @@ export interface FsmResult {
 
 export interface ChipAnalysisResult {
   inputs: string[];
+  inputBits: number[];
+  inputBitCount: number;
   outputs: string[];
   hasClock: boolean;        // contains a CLK — behavior also depends on wall time
   truth: TruthRow[] | null; // from the power-on state; null when inputs > MAX_TT_INPUTS
@@ -47,9 +54,23 @@ const containsClock = (def: ChipDef, lib: ChipLib, depth = 0): boolean => {
     (c.type === 'CHIP' && !!c.chipId && !!lib[c.chipId] && containsClock(lib[c.chipId], lib, depth + 1)));
 };
 
-/* bit i of a combo drives input pin i */
+/* Classic truth-table order: the first displayed bit is the MSB, producing
+   00, 01, 10, 11 for two inputs instead of the former 00, 10, 01, 11. */
 export const comboIns = (combo: number, n: number): number[] =>
-  Array.from({ length: n }, (_, i) => (combo >> i) & 1);
+  Array.from({ length: n }, (_, i) => Math.floor(combo / (2 ** (n - i - 1))) % 2);
+
+/* Decode the flattened combination space into one numeric value per chip
+   input.  Pins occupy consecutive MSB-first fields, matching conventional
+   truth tables and the editor's default table notation. Analysis
+   never calls this above MAX_TT_INPUT_BITS, so every value is exact. */
+export const comboPinIns = (combo: number, widths: number[]): number[] => {
+  let offset = widths.reduce((sum, width) => sum + width, 0);
+  return widths.map(width => {
+    offset -= width;
+    const value = Math.floor(combo / (2 ** offset)) % (2 ** width);
+    return value;
+  });
+};
 
 export const comboLabel = (combo: number, n: number): string =>
   comboIns(combo, n).join('');
@@ -78,31 +99,40 @@ function settle(def: ChipDef, state: SimState, ins: number[], lib: ChipLib): big
   let prev = '';
   for (let i = 0; i < 4; i++) {
     outs = evalChip(def, state, ins, lib, 0, 0);
-    const k = keyOf(state) + '/' + outs.join('');
+    const k = keyOf(state) + '/' + outputKey(outs);
     if (k === prev) break;
     prev = k;
   }
   return outs;
 }
 
+/* Length-prefix each value so vectors such as [1, 23] and [12, 3] cannot
+   collapse to the same key (both used to serialize as "123"). */
+const outputKey = (outs: bigint[]): string =>
+  outs.map(v => { const s = v.toString(); return `${s.length}:${s}`; }).join('|');
+
 export function analyzeChip(def: ChipDef, lib: ChipLib): ChipAnalysisResult {
-  const nIn = def.inputs.length;
-  const nCombos = 1 << nIn;
+  const inputBits = chipInputBits(def);
+  const inputBitCount = inputBits.reduce((sum, width) => sum + width, 0);
   const hasClock = containsClock(def, lib);
+  const resultBase = { inputs: def.inputs, inputBits, inputBitCount, outputs: def.outputs, hasClock };
 
   /* ── truth table from the power-on state ── */
   let truth: TruthRow[] | null = null;
-  if (nIn <= MAX_TT_INPUTS) {
+  if (inputBitCount <= MAX_TT_INPUT_BITS) {
+    const nCombos = 2 ** inputBitCount;
     truth = [];
     for (let combo = 0; combo < nCombos; combo++) {
-      const ins = comboIns(combo, nIn);
+      const ins = comboPinIns(combo, inputBits);
       truth.push({ ins, outs: settle(def, newSimState(), ins, lib) });
     }
   }
 
-  if (nIn > MAX_FSM_INPUTS) {
-    return { inputs: def.inputs, outputs: def.outputs, hasClock, truth, kind: 'unknown', fsm: null };
+  if (inputBitCount > MAX_FSM_INPUT_BITS) {
+    return { ...resultBase, truth, kind: 'unknown', fsm: null };
   }
+
+  const nCombos = 2 ** inputBitCount;
 
   /* ── explore raw snapshot space ── */
   interface RawNode { state: SimState; next: number[]; outs: bigint[][] } // per combo
@@ -110,7 +140,7 @@ export function analyzeChip(def: ChipDef, lib: ChipLib): ChipAnalysisResult {
   const idByKey = new Map<string, number>();
 
   const s0 = newSimState();
-  settle(def, s0, comboIns(0, nIn), lib);
+  settle(def, s0, comboPinIns(0, inputBits), lib);
   idByKey.set(keyOf(s0), 0);
   nodes.push({ state: s0, next: [], outs: [] });
 
@@ -119,7 +149,7 @@ export function analyzeChip(def: ChipDef, lib: ChipLib): ChipAnalysisResult {
     const node = nodes[i];
     for (let combo = 0; combo < nCombos; combo++) {
       const nextState = cloneState(node.state);
-      const outs = settle(def, nextState, comboIns(combo, nIn), lib);
+      const outs = settle(def, nextState, comboPinIns(combo, inputBits), lib);
       const key = keyOf(nextState);
       let id = idByKey.get(key);
       if (id === undefined) {
@@ -134,14 +164,14 @@ export function analyzeChip(def: ChipDef, lib: ChipLib): ChipAnalysisResult {
   }
 
   if (overflow) {
-    return { inputs: def.inputs, outputs: def.outputs, hasClock, truth, kind: 'unknown', fsm: null };
+    return { ...resultBase, truth, kind: 'unknown', fsm: null };
   }
 
   /* ── Mealy minimization: partition refinement ── */
   // initial partition: nodes with identical output vectors across all combos
   let part = new Map<string, number>();
   let cls = nodes.map(n => {
-    const sig = n.outs.map(o => o.join('')).join('|');
+    const sig = n.outs.map(outputKey).join('/');
     if (!part.has(sig)) part.set(sig, part.size);
     return part.get(sig)!;
   });
@@ -178,7 +208,7 @@ export function analyzeChip(def: ChipDef, lib: ChipLib): ChipAnalysisResult {
       const rawTo = node.next[combo];
       const to = stateOf(rawTo);
       if (!seen.has(to)) queue.push(rawTo);
-      const gk = `${from}>${to}/${node.outs[combo].join('')}`;
+      const gk = `${from}>${to}/${outputKey(node.outs[combo])}`;
       const e = edgeMap.get(gk);
       if (e) e.combos.push(combo);
       else edgeMap.set(gk, { from, to, combos: [combo], outs: node.outs[combo] });
@@ -187,10 +217,10 @@ export function analyzeChip(def: ChipDef, lib: ChipLib): ChipAnalysisResult {
 
   const nStates = renum.size;
   if (nStates <= 1) {
-    return { inputs: def.inputs, outputs: def.outputs, hasClock, truth, kind: 'combinational', fsm: null };
+    return { ...resultBase, truth, kind: 'combinational', fsm: null };
   }
   return {
-    inputs: def.inputs, outputs: def.outputs, hasClock, truth,
+    ...resultBase, truth,
     kind: 'sequential',
     fsm: { states: nStates, edges: [...edgeMap.values()] },
   };

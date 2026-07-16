@@ -11,6 +11,7 @@ import {
   busToolLayout, bitWeightName, chipUniformBits, scaleChipDefBits, isVhdlChip, makeVhdlChipDef,
   isNoteType, NOTE_COLORS, NOTE_FONT_SIZES, NOTE_MAX_TEXT,
   TableData, normalizeTable, defaultTruthTable, TABLE_MAX_CELL, TABLE_MAX_COLS, TABLE_MAX_ROWS,
+  isPinEnd, isAttachEnd,
 } from '@/lib/engine';
 import { GATE_DEFS, isGateType } from '@/lib/gates';
 import { createEditor, EditorApi, SelInfo, PlacingInfo } from '@/components/editor';
@@ -99,6 +100,25 @@ function seedBoard(): Board {
   };
 }
 
+/* Remove every placed copy of a library chip from one saved sheet, then
+   cascade away branches attached to the removed wires. Chip deletion is a
+   library-wide action, so this is applied to every tab rather than only the
+   board that happens to be mounted in the editor. */
+function withoutChipInstances(board: Board, chipId: string): Board {
+  const clean = cloneBoard(board);
+  const doomed = new Set(clean.comps.filter(c => c.type === 'CHIP' && c.chipId === chipId).map(c => c.id));
+  if (!doomed.size) return clean;
+  clean.comps = clean.comps.filter(c => !doomed.has(c.id));
+  clean.wires = clean.wires.filter(w => ![w.a, w.b].some(e => isPinEnd(e) && doomed.has(e.comp)));
+  for (;;) {
+    const ids = new Set(clean.wires.map(w => w.id));
+    const kept = clean.wires.filter(w => [w.a, w.b].every(e => !isAttachEnd(e) || ids.has(e.wire)));
+    if (kept.length === clean.wires.length) break;
+    clean.wires = kept;
+  }
+  return clean;
+}
+
 /* Tiny static icons for the palette */
 function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
   const g = getGeom({ type, chipId: chip?.id }, chip ? { [chip.id]: chip } : {});
@@ -124,7 +144,7 @@ function PalIcon({ type, chip }: { type: CompType; chip?: ChipDef }) {
     case 'VAL': body = <><rect x="0" y="0" width={g.w} height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x={g.w / 2} y="25" textAnchor="middle" fill="var(--hi)" fontSize="11" fontFamily="ui-monospace,Menlo,monospace">1010</text></>; break;
     case 'CLK': body = <><rect x="0" y="0" width="60" height="40" rx="9" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M10,27 H19 V13 H29 V27 H39 V13 H49" fill="none" stroke="var(--hi)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" /></>; break;
     case 'OUT': body = <><rect x="0" y="0" width="40" height="40" rx="10" fill={fill} stroke={stroke} strokeWidth="1.5" /><circle cx="20" cy="20" r="11" fill="var(--led-on)" stroke="#ff6b61" strokeWidth="1.5" /></>; break;
-    case 'SSEG': body = <><rect x="0" y="0" width="100" height="160" rx="9" fill={fill} stroke={stroke} strokeWidth="2.5" /><rect x="28" y="8" width="64" height="144" rx="7" fill="#141417" /><text x="60" y="118" textAnchor="middle" fill="var(--led-on)" fontSize="96" fontFamily="ui-monospace,Menlo,monospace">8</text></>; break;
+    case 'SSEG': body = <><rect x="0" y="0" width="100" height="160" rx="9" fill={fill} stroke={stroke} strokeWidth="2.5" /><rect x="28" y="8" width="64" height="144" rx="7" fill="#141417" /><text x="60" y="118" textAnchor="middle" fill="var(--seg-on)" fontSize="96" fontFamily="ui-monospace,Menlo,monospace">8</text></>; break;
     case 'TUN': body = <><path d="M2,20 L18,4 H70 A8,8 0 0 1 78,12 V28 A8,8 0 0 1 70,36 H18 Z" fill={fill} stroke={stroke} strokeWidth="1.5" /><text x="46" y="25" textAnchor="middle" fill="var(--muted)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">T1</text></>; break;
     case 'COMB': body = <><rect x="0" y="0" width="60" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,0 H0 M-8,20 H0 M-8,40 H0 M-8,60 H0 M60,40 H70" stroke="var(--lo)" strokeWidth="2" /><text x="30" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
     case 'SPLIT': body = <><rect x="0" y="0" width="80" height="60" rx="8" fill={fill} stroke={stroke} strokeWidth="1.5" /><path d="M-8,40 H0 M80,0 H90 M80,20 H90 M80,40 H90 M80,60 H90" stroke="var(--lo)" strokeWidth="2" /><text x="40" y="35" textAnchor="middle" fill="var(--hi)" fontSize="13" fontFamily="ui-monospace,Menlo,monospace">0110</text></>; break;
@@ -199,6 +219,17 @@ function SearchIcon() {
 function Modal({ children, onDismiss, className, label }: {
   children: React.ReactNode; onDismiss: () => void; className?: string; label: string;
 }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      onDismiss();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [onDismiss]);
+
   return (
     <motion.div
       className="overlay"
@@ -298,18 +329,25 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
   };
   const startPalResize = (e: React.PointerEvent) => {
     e.preventDefault();
+    const pointerId = e.pointerId;
     const startX = e.clientX, startW = palWidthRef.current;
     const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
       palWidthRef.current = clampPalW(startW + ev.clientX - startX);
       setPalWidth(palWidthRef.current);
     };
-    const up = () => {
+    const finish = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      window.removeEventListener('blur', finish);
       persistPal();
     };
+    const up = (ev: PointerEvent) => { if (ev.pointerId === pointerId) finish(); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    window.addEventListener('blur', finish);
   };
 
   const lib: ChipLib = useMemo(() => Object.fromEntries(chips.map(c => [c.id, c])), [chips]);
@@ -354,6 +392,23 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     setTabs(tabsRef.current.map(tabMeta));
   }, []);
 
+  /* A malformed hand-edited/localStorage board should cost at most that
+     one sheet, never the whole workbench. setBoard performs the detailed
+     normalization; this boundary supplies a clean fallback if it rejects
+     anything it cannot render. */
+  const setEditorBoard = useCallback((tab: TabData, editor = apiRef.current): boolean => {
+    if (!editor) return false;
+    try {
+      editor.setBoard(tab.board);
+      return true;
+    } catch {
+      tab.board = { comps: [], wires: [] };
+      editor.setBoard(tab.board);
+      notify(`“${tab.name}” contained invalid saved data, so it was opened as an empty sheet.`);
+      return false;
+    }
+  }, [notify]);
+
   const switchTab = useCallback((id: string) => {
     if (id === activeTabRef.current) return;
     const t = tabsRef.current.find(t => t.id === id);
@@ -363,9 +418,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     setActiveTab(id);
     // a VHDL tab leaves the (hidden) canvas untouched — the next board
     // tab reloads it
-    if (t.kind !== 'vhdl') apiRef.current!.setBoard(t.board);
+    if (t.kind !== 'vhdl') setEditorBoard(t);
     persistTabs();
-  }, [syncActiveBoard, persistTabs]);
+  }, [syncActiveBoard, setEditorBoard, persistTabs]);
 
   const addTab = useCallback((name?: string, board?: Board, chipId?: string) => {
     syncActiveBoard();
@@ -380,9 +435,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     activeTabRef.current = t.id;
     setActiveTab(t.id);
     publishTabs();
-    apiRef.current!.setBoard(t.board);
+    setEditorBoard(t);
     persistTabs();
-  }, [syncActiveBoard, publishTabs, persistTabs]);
+  }, [syncActiveBoard, publishTabs, setEditorBoard, persistTabs]);
 
   const closeTab = useCallback((id: string) => {
     if (tabsRef.current.length <= 1) { notify('That’s the last tab — clear it instead.'); return; }
@@ -393,11 +448,11 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       const next = tabsRef.current[Math.max(0, idx - 1)];
       activeTabRef.current = next.id;
       setActiveTab(next.id);
-      if (next.kind !== 'vhdl') apiRef.current!.setBoard(next.board);
+      if (next.kind !== 'vhdl') setEditorBoard(next);
     }
     publishTabs();
     persistTabs();
-  }, [notify, publishTabs, persistTabs]);
+  }, [notify, publishTabs, setEditorBoard, persistTabs]);
 
   const renameTab = useCallback((id: string, name: string) => {
     const t = tabsRef.current.find(t => t.id === id);
@@ -594,9 +649,30 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     const restoreTabs = () => {
       let data: { tabs?: TabData[]; active?: string } | null = null;
       try { data = JSON.parse(localStorage.getItem(LS_TABS) || 'null'); } catch {}
-      let loaded = Array.isArray(data?.tabs)
-        ? data!.tabs!.filter(t => t && typeof t.id === 'string' && t.board)
-        : [];
+      const seen = new Set<string>();
+      let loaded: TabData[] = [];
+      if (Array.isArray(data?.tabs)) {
+        for (const raw of data!.tabs!) {
+          if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !raw.id || seen.has(raw.id)) continue;
+          try {
+            const kind = raw.kind === 'vhdl' ? 'vhdl' as const : undefined;
+            const tab: TabData = {
+              id: raw.id,
+              name: (typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : 'Untitled').slice(0, 20),
+              board: cloneBoard(raw.board),
+              ...(kind ? { kind } : {}),
+              ...(typeof raw.chipId === 'string' && chipsRef.current[raw.chipId] ? { chipId: raw.chipId } : {}),
+              ...(typeof raw.vhdlChipId === 'string' && chipsRef.current[raw.vhdlChipId] ? { vhdlChipId: raw.vhdlChipId } : {}),
+              ...(kind && typeof raw.vhdlSource === 'string' ? { vhdlSource: raw.vhdlSource } : {}),
+            };
+            loaded.push(tab);
+            seen.add(tab.id);
+          } catch {
+            // Skip structurally corrupt tabs. A valid tab below (or the
+            // starter sheet) still opens, so one bad record cannot brick UI.
+          }
+        }
+      }
       if (!loaded.length) {
         // migrate the old single-board save into the first tab
         let legacy: Board | null = null;
@@ -611,9 +687,14 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       activeTabRef.current = active;
       setActiveTab(active);
       setTabs(loaded.map(tabMeta));
-      try { ed.setBoard(loaded.find(t => t.id === active)!.board); } catch { ed.setBoard(seedBoard()); }
+      const current = loaded.find(t => t.id === active)!;
+      if (current.kind !== 'vhdl') setEditorBoard(current, ed);
+      persistTabs();
     };
 
+    // Local work is available immediately. Account chip sync happens in
+    // the background and never replaces a sheet the user has begun editing.
+    restoreTabs();
     if (user) {
       fetch('/api/chips')
         .then(r => (r.ok ? r.json() : []))
@@ -622,14 +703,27 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
           for (const c of remote || []) if (!byId.has(c.id)) byId.set(c.id, migrateChipDef(c));
           const merged = [...byId.values()].sort((a, b) => a.createdAt - b.createdAt);
           setChips(merged);
-          restoreTabs();
+          ed.rerender();
         })
-        .catch(restoreTabs);
-    } else {
-      restoreTabs();
+        .catch(() => {});
     }
 
-    return () => ed.destroy();
+    const flushPendingSave = () => {
+      if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+      syncActiveBoard();
+      persistTabs();
+    };
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flushPendingSave(); };
+    window.addEventListener('pagehide', flushPendingSave);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      window.removeEventListener('pagehide', flushPendingSave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      flushPendingSave();
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+      ed.destroy();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -714,6 +808,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       ...(editingChip.folder ? { folder: editingChip.folder } : {}),
     };
     setChips(chips.map(c => (c.id === editingChip.id ? updated : c)));
+    // The chip's port widths/count may have changed with its internals.
+    // Refresh placed packages and every wire touching those ports now.
+    apiRef.current!.refreshWireBits();
     notify(`Updated “${editingChip.name}” — every placed copy now uses the new internals.`);
   };
 
@@ -754,9 +851,39 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
 
   const confirmDeleteChip = () => {
     if (!deleteAsk) return;
-    apiRef.current!.removeChipInstances(deleteAsk.id);
-    setChips(chips.filter(c => c.id !== deleteAsk.id));
-    notify(`Deleted “${deleteAsk.name}”.`);
+    const doomed = deleteAsk;
+    syncActiveBoard();
+
+    // Disarm a deleted chip before another tab can stamp an invalid copy.
+    if (armed?.type === 'CHIP' && armed.chipId === doomed.id) {
+      apiRef.current!.beginPlace('CHIP', doomed.id);
+    }
+
+    const before = tabsRef.current;
+    const oldIndex = Math.max(0, before.findIndex(t => t.id === activeTabRef.current));
+    let kept = before
+      .filter(t => t.chipId !== doomed.id && t.vhdlChipId !== doomed.id)
+      .map(t => {
+        if (t.kind === 'vhdl') return t;
+        try { return { ...t, board: withoutChipInstances(t.board, doomed.id) }; }
+        catch { return { ...t, board: { comps: [], wires: [] } }; }
+      });
+    if (!kept.length) {
+      kept = [{ id: newTabId(), name: 'Sheet 1', board: { comps: [], wires: [] } }];
+    }
+    tabsRef.current = kept;
+
+    let next = kept.find(t => t.id === activeTabRef.current);
+    if (!next) next = kept[Math.min(oldIndex, kept.length - 1)];
+    activeTabRef.current = next.id;
+    setActiveTab(next.id);
+    publishTabs();
+    if (next.kind !== 'vhdl') setEditorBoard(next);
+
+    setChips(Object.values(chipsRef.current).filter(c => c.id !== doomed.id)
+      .sort((a, b) => a.createdAt - b.createdAt));
+    persistTabs();
+    notify(`Deleted “${doomed.name}” from the library and every sheet.`);
     setDeleteAsk(null);
   };
 
@@ -958,7 +1085,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
     apiRef.current!.clear();
   };
 
-  const api = () => apiRef.current!;
+  // Stable identity matters to TimingPanel: its unmount cleanup resumes
+  // recording, and must not run merely because Simulator rerendered.
+  const api = useCallback(() => apiRef.current!, []);
 
   const peekDef = peek ? lib[peek.chipId] : undefined;
 
@@ -1013,7 +1142,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       role="button" tabIndex={0}
       title="Click to stamp copies on the grid — drag onto a folder to organize, double-click to edit the internals"
       onPointerDown={chipDragStart(def)}
-      onKeyDown={e => { if (e.key === 'Enter') placeChip(def); }}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); placeChip(def); }
+      }}
       onDoubleClick={e => {
         if ((e.target as HTMLElement).closest('.chip-actions,.folderpop')) return;
         askEditChip(def.id);
@@ -1223,7 +1354,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
                       role="button" tabIndex={0}
                       title="Click, then stamp copies on the grid — esc stops"
                       onPointerDown={e => { e.preventDefault(); api().beginPlace(t); }}
-                      onKeyDown={e => { if (e.key === 'Enter') api().beginPlace(t); }}>
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); api().beginPlace(t); }
+                      }}>
                       <PalIcon type={t} />
                       <div><div className="nm">{hiName(g.name)}</div><div className="sub">{g.sub}</div></div>
                     </div>
@@ -1368,7 +1501,9 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
           title="Drag to resize the palette" onPointerDown={startPalResize} />
 
         <div id="canvaswrap">
-          <svg id="board" ref={svgRef} xmlns="http://www.w3.org/2000/svg">
+          <svg id="board" ref={svgRef} xmlns="http://www.w3.org/2000/svg"
+            role="application" tabIndex={0}
+            aria-label="Circuit canvas. Place and wire components; use the keyboard shortcuts shown in the status bar.">
             <defs>
               {/* x/y offset aligns the dots to the (20k, 20k) lattice that
                   components snap to — every pin sits exactly on a dot */}
@@ -1787,12 +1922,16 @@ export default function Simulator({ user, authEnabled }: { user: SimUser | null;
       <div id="tabbar" role="tablist" aria-label="Editor tabs">
         <div className="tabscroll">
           {tabs.map(t => (
-            <div key={t.id} role="tab" aria-selected={t.id === activeTab}
+            <div key={t.id} role="tab" aria-selected={t.id === activeTab} tabIndex={0}
               className={'edtab' + (t.id === activeTab ? ' on' : '') + (t.chipId ? ' chiptab' : '') + (t.kind === 'vhdl' ? ' vhdltab' : '')}
               title={t.kind === 'vhdl'
                 ? `VHDL module editor — double-click to rename`
                 : t.chipId ? `Editing the internals of “${t.name}” — double-click to rename` : 'Double-click to rename'}
               onPointerDown={() => switchTab(t.id)}
+              onKeyDown={e => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchTab(t.id); }
+              }}
               onDoubleClick={() => { setRenaming(t.id); setRenameDraft(t.name); }}>
               {(t.chipId || t.kind === 'vhdl') && <span className="edtab-dot" aria-hidden="true" />}
               {renaming === t.id ? (

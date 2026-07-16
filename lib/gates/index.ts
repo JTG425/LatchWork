@@ -22,4 +22,9 @@ export type GateType = keyof typeof GATE_DEFS;
 
 export const GATE_TYPES = Object.keys(GATE_DEFS) as GateType[];
 
-export const isGateType = (t: string): t is GateType => t in GATE_DEFS;
+/* `in` also walks Object.prototype (so strings such as "toString" were
+   incorrectly accepted as gate types and could crash callers that then
+   treated the inherited function as a GateDef).  Component types can come
+   from persisted/user-authored JSON, so keep this guard genuinely exact. */
+export const isGateType = (t: string): t is GateType =>
+  Object.prototype.hasOwnProperty.call(GATE_DEFS, t);

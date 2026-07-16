@@ -307,7 +307,12 @@
     function emitSel() {
       if (selWire) {
         const w = wires.find(x => x.id === selWire);
-        cb.onSelect({ kind: 'wire', id: selWire, bits: clampBits(w?.bits) });
+        if (!w) {
+          selWire = null;
+          cb.onSelect(null);
+          return;
+        }
+        cb.onSelect({ kind: 'wire', id: selWire, bits: clampBits(w.bits) });
         return;
       }
       if (selIds.size === 1) {
@@ -674,7 +679,7 @@
         const on = (i: number) => (c._ins?.[i] ?? 0) ? 1 : 0;
         const ox = 42, oy = 26, W = 36, H = 104, my = oy + H / 2;
         const seg = (i: number, d: string) =>
-          `<path d="${d}" class="seg${on(i) ? ' hi' : ''}" ${on(i) ? 'filter="url(#ledglow)"' : ''}/>`;
+          `<path d="${d}" class="seg${on(i) ? ' hi' : ''}"/>`;
         inner = `<rect class="body" x="0" y="0" width="${g.w}" height="${g.h}" rx="9"/>
           <rect x="28" y="8" width="${g.w - 36}" height="${g.h - 16}" rx="7" fill="#141417"/>`
           + seg(0, `M${ox + 4},${oy} H${ox + W - 4}`)                    // a
@@ -684,7 +689,7 @@
           + seg(4, `M${ox},${my + 4} V${oy + H - 4}`)                    // e
           + seg(5, `M${ox},${oy + 4} V${my - 4}`)                        // f
           + seg(6, `M${ox + 4},${my} H${ox + W - 4}`)                    // g
-          + `<circle cx="${ox + W + 12}" cy="${oy + H}" r="4.5" class="seg${on(7) ? ' hi' : ''}" ${on(7) ? 'filter="url(#ledglow)"' : ''}/>`;
+          + `<circle cx="${ox + W + 12}" cy="${oy + H}" r="4.5" class="seg${on(7) ? ' hi' : ''}"/>`;
         g.ins.forEach((p, i) => {
           inner += `<text class="pinname" x="10" y="${p.y + 3}" text-anchor="start"${ctr(10, p.y)}>${SEG_NAMES[i]}</text>`;
         });
@@ -895,13 +900,35 @@
       const [comp, side, pin] = (el as SVGElement).dataset.pin!.split('|');
       return { comp, side: side as 'in' | 'out', pin: +pin };
     }
-    /* Bus pins (e.g. the combiner's 4-bit output) seed the wire's width. */
+    /* Bus pins (e.g. the combiner's 4-bit output) seed the wire's width.
+       A split endpoint inherits its host wire too, so every new branch of
+       a bus is visibly a bus rather than silently falling back to 1 bit. */
     function pinBits(e: WireEnd): number {
+      if (isAttachEnd(e)) return clampBits(wires.find(w => w.id === e.wire)?.bits);
       if (!isPinEnd(e)) return 1;
       const c = find(e.comp);
       if (!c) return 1;
       const g = getGeom(c, lib());
       return g[e.side === 'out' ? 'outs' : 'ins'][e.pin]?.bits ?? 1;
+    }
+
+    /* Re-seed every pin- or branch-connected wire. Multiple passes let bus
+       widths flow through chains of attached branches regardless of the
+       array order in imported/hand-edited saves. */
+    function refreshPinWireBits() {
+      for (let pass = 0; pass < Math.max(1, wires.length); pass++) {
+        let changed = false;
+        for (const w of wires) {
+          const ends = [w.a, w.b];
+          if (!ends.some(e => isPinEnd(e) || isAttachEnd(e))) continue;
+          const before = clampBits(w.bits);
+          const b = Math.max(pinBits(w.a), pinBits(w.b));
+          if (b > 1) w.bits = b;
+          else if (w.bits && (ends.some(isAttachEnd) || ends.every(isPinEnd))) delete w.bits;
+          if (clampBits(w.bits) !== before) changed = true;
+        }
+        if (!changed) break;
+      }
     }
     function buildWire(a: WireEnd, b: WireEnd, via: Vec[]): boolean {
       if (isPinEnd(a) && isPinEnd(b)) {
@@ -1390,8 +1417,10 @@
       const wireEl = target.closest('[data-wire]');
       if (compEl) deleteComp((compEl as SVGElement).dataset.comp!);
       else if (wireEl) {
-        wires = wires.filter(w => w.id !== (wireEl as SVGElement).dataset.wire);
+        const id = (wireEl as SVGElement).dataset.wire!;
+        wires = wires.filter(w => w.id !== id);
         pruneAttached();
+        if (selWire === id) setSelection([]);
         refresh();
       }
     }
@@ -1415,6 +1444,7 @@
     }
 
     function onKey(e: KeyboardEvent) {
+      if (e.defaultPrevented) return;
       const t = e.target as HTMLElement;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
       if (t && t.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return; // space/enter press the button
@@ -1511,11 +1541,7 @@
         const g = getGeom(c, lib());
         wires = wires.filter(w => ![w.a, w.b].some(e =>
           isPinEnd(e) && e.comp === id && e.pin >= g[e.side === 'out' ? 'outs' : 'ins'].length));
-        for (const w of wires) {
-          if (![w.a, w.b].some(e => isPinEnd(e) && e.comp === id)) continue;
-          const b = Math.max(pinBits(w.a), pinBits(w.b));
-          if (b > 1) w.bits = b; else delete w.bits;
-        }
+        refreshPinWireBits();
         pruneAttached();
         if (selIds.has(id)) emitSel();
         refresh();
@@ -1528,11 +1554,7 @@
         if (c.bits === 1 && (isGateType(c.type) || isMemoryType(c.type))) delete c.bits;
         if (c.val != null) c.val = storeVal(maskVal(c.val, c.bits ?? 1));
         // re-seed connected wires' bus width from the resized pin
-        for (const w of wires) {
-          if (![w.a, w.b].some(e => isPinEnd(e) && e.comp === id)) continue;
-          const b = Math.max(pinBits(w.a), pinBits(w.b));
-          if (b > 1) w.bits = b; else delete w.bits;
-        }
+        refreshPinWireBits();
         if (selIds.has(id)) emitSel();
         refresh();
       },
@@ -1581,12 +1603,7 @@
         refresh();
       },
       refreshWireBits() {
-        for (const w of wires) {
-          if (![w.a, w.b].some(e => isPinEnd(e))) continue;
-          const b = Math.max(pinBits(w.a), pinBits(w.b));
-          if (b > 1) w.bits = b;
-          else if (w.bits && [w.a, w.b].every(e => isPinEnd(e))) delete w.bits;
-        }
+        refreshPinWireBits();
         refresh();
       },
       getBoard(): Board {
@@ -1595,11 +1612,29 @@
       setBoard(b: Board) {
         const known = lib();
         const clean = cloneBoard(b);
+        // Board changes invalidate all gestures whose ids/coordinates came
+        // from the previous sheet. In particular, an unfinished pin wire
+        // must never be allowed to land on a component in another tab.
+        wiring = null;
+        drag = null;
+        resize = null;
+        pan = null;
+        marquee = null;
+        hoverWire = null;
+        touchPts.clear();
+        pinch = null;
+        pinchPause = false;
+        touchStamp = null;
+        lastPt = { x: 0, y: 0, over: false };
+        setPlacing(null);
+        svg.classList.remove('panning');
         comps = clean.comps.filter(c => c.type !== 'CHIP' || (c.chipId && known[c.chipId]));
         wires = normalizeWires(clean.wires).filter(w =>
           [w.a, w.b].every(e => !isPinEnd(e) || comps.some(c => c.id === e.comp)));
         pruneAttached();
         sim = newSimState();
+        traces.clear();
+        lastClockSig = '';
         setSelection([]);
         refresh(false);
       },

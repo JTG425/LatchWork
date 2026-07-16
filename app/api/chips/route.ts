@@ -18,7 +18,7 @@ function chipsPathForUser(userId: string) {
 const blobToken = () => process.env.LATCH_BLOB_READ_WRITE_TOKEN;
 
 async function getAuth0UserId() {
-  if (!authConfigured) return null;
+  if (!authConfigured || !auth0) return null;
   const session = await auth0.getSession();
   return session?.user?.sub ?? null;
 }

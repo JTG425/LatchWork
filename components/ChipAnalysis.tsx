@@ -6,7 +6,9 @@
 
 import { useMemo, useState } from 'react';
 import { ChipDef, ChipLib, chipOutputBits, formatBusValue } from '@/lib/engine';
-import { analyzeChip, comboLabel, MAX_TT_INPUTS, MAX_FSM_INPUTS, FsmEdge } from '@/lib/analyze';
+import {
+  analyzeChip, comboPinIns, MAX_TT_INPUT_BITS, MAX_FSM_INPUT_BITS, FsmEdge,
+} from '@/lib/analyze';
 import { chipAbstractSVG, chipInternalsSVG } from '@/lib/chip-svg';
 
 /* ── preview with abstract / internals toggle ── */
@@ -34,7 +36,12 @@ export function ChipThumb({ def }: { def: ChipDef }) {
 }
 
 /* ── state diagram (SVG, circle layout) ── */
-function StateDiagram({ states, edges, nIn }: { states: number; edges: FsmEdge[]; nIn: number }) {
+function StateDiagram({ states, edges, inputBits, outputBits }: {
+  states: number;
+  edges: FsmEdge[];
+  inputBits: number[];
+  outputBits: number[];
+}) {
   const R = Math.max(85, states * 30);
   const NODE_R = 22;
   const size = 2 * (R + 80);
@@ -43,8 +50,11 @@ function StateDiagram({ states, edges, nIn }: { states: number; edges: FsmEdge[]
     const a = -Math.PI / 2 + (i * 2 * Math.PI) / states;
     return { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) };
   };
+  const inputLabel = (combo: number) => comboPinIns(combo, inputBits)
+    .map((v, i) => formatBusValue(v, inputBits[i] ?? 1)).join(' ');
   const label = (e: FsmEdge) =>
-    e.combos.map(c => comboLabel(c, nIn)).join(',') + ' / ' + e.outs.map(String).join('');
+    e.combos.map(inputLabel).join(', ') + ' / '
+    + e.outs.map((v, i) => formatBusValue(v, outputBits[i] ?? 1)).join(' ');
 
   // parallel edges between the same pair bow at increasing offsets
   const pairCount = new Map<string, number>();
@@ -126,7 +136,9 @@ export default function ChipAnalysis({ def, lib }: { def: ChipDef; lib: ChipLib 
         <span className={'badge ' + (a.kind === 'sequential' ? 'seq' : a.kind === 'combinational' ? 'comb' : '')}>
           {a.kind === 'sequential' ? 'Sequential logic' : a.kind === 'combinational' ? 'Combinational logic' : 'Behavior not fully explored'}
         </span>
-        <span className="badge">{a.inputs.length} in · {a.outputs.length} out</span>
+        <span className="badge">
+          {a.inputs.length} in · {a.inputBitCount} input bit{a.inputBitCount === 1 ? '' : 's'} · {a.outputs.length} out
+        </span>
         {a.hasClock && <span className="badge clk">Contains a clock — outputs also change with time</span>}
       </div>
 
@@ -136,7 +148,7 @@ export default function ChipAnalysis({ def, lib }: { def: ChipDef; lib: ChipLib 
           <table className="truthtable mono">
             <thead>
               <tr>
-                {a.inputs.map((n, i) => <th key={'i' + i}>{n}</th>)}
+                {a.inputs.map((n, i) => <th key={'i' + i}>{n}{(a.inputBits[i] ?? 1) > 1 ? ` [${a.inputBits[i]}b]` : ''}</th>)}
                 <th className="ttsep" aria-hidden="true">→</th>
                 {a.outputs.map((n, i) => <th key={'o' + i}>{n}</th>)}
               </tr>
@@ -144,7 +156,9 @@ export default function ChipAnalysis({ def, lib }: { def: ChipDef; lib: ChipLib 
             <tbody>
               {a.truth.map((row, r) => (
                 <tr key={r}>
-                  {row.ins.map((v, i) => <td key={'i' + i}>{v}</td>)}
+                  {row.ins.map((v, i) => (
+                    <td key={'i' + i} className={v ? 'hi' : ''}>{formatBusValue(v, a.inputBits[i] ?? 1)}</td>
+                  ))}
                   <td className="ttsep" aria-hidden="true" />
                   {row.outs.map((v, i) => <td key={'o' + i} className={v ? 'hi' : ''}>{formatBusValue(v, outBits[i] ?? 1)}</td>)}
                 </tr>
@@ -153,7 +167,7 @@ export default function ChipAnalysis({ def, lib }: { def: ChipDef; lib: ChipLib 
           </table>
         </div>
       ) : (
-        <p className="analysis-note">This chip has more than {MAX_TT_INPUTS} inputs — too many combinations to enumerate.</p>
+        <p className="analysis-note">This chip has more than {MAX_TT_INPUT_BITS} total input bits — too many combinations to enumerate.</p>
       )}
 
       <h3>State machine</h3>
@@ -162,8 +176,8 @@ export default function ChipAnalysis({ def, lib }: { def: ChipDef; lib: ChipLib 
       )}
       {a.kind === 'unknown' && (
         <p className="analysis-note">
-          {a.inputs.length > MAX_FSM_INPUTS
-            ? `State exploration is limited to chips with at most ${MAX_FSM_INPUTS} inputs.`
+          {a.inputBitCount > MAX_FSM_INPUT_BITS
+            ? `State exploration is limited to chips with at most ${MAX_FSM_INPUT_BITS} total input bits.`
             : 'This chip reaches too many internal states to diagram.'}
         </p>
       )}
@@ -175,7 +189,8 @@ export default function ChipAnalysis({ def, lib }: { def: ChipDef; lib: ChipLib 
             takes the transition, and the outputs it produces.
           </p>
           <div className="fsmwrap">
-            <StateDiagram states={a.fsm.states} edges={a.fsm.edges} nIn={a.inputs.length} />
+            <StateDiagram states={a.fsm.states} edges={a.fsm.edges}
+              inputBits={a.inputBits} outputBits={outBits} />
           </div>
         </>
       )}
