@@ -1,6 +1,5 @@
 import type { MetadataRoute } from 'next';
-
-const SITE_URL = (process.env.APP_BASE_URL ?? 'https://www.latchwork.io').replace(/\/+$/, '');
+import { SITE_URL } from '@/lib/site';
 
 export default function sitemap(): MetadataRoute.Sitemap {
   return [
